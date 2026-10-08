@@ -7,6 +7,7 @@
 #include "broremote/protocol.h"
 #include "broremote/stream.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -38,6 +39,13 @@ struct ClientHandlers {
     // Once, when the connection ends for any reason, including the Client's
     // destruction, with what ended it.
     std::function<void(const std::string&)> on_closed;
+    // 1.1: the answer to ping(): when it was sent and received (this side's
+    // steady clock) and the server's clock when it answered.
+    std::function<void(std::chrono::steady_clock::time_point sent, std::chrono::steady_clock::time_point received,
+                       uint64_t server_time_us)>
+        on_pong;
+    // 1.1: a Video message was handed whole to the server's socket.
+    std::function<void(const FrameSentMsg&)> on_frame_sent;
 };
 
 class Client {
@@ -66,6 +74,9 @@ public:
     void request_keyframe();
     void send_input(const InputEvent& event);
     void set_codecs(const std::vector<Codec>& codecs, uint32_t max_bitrate_kbps = 0);
+    // Measures the transport's round trip (on_pong). False, sending nothing,
+    // when the server speaks 1.0 (it would answer Error(UnknownMessage)).
+    bool ping();
 
     // False once the connection has ended.
     [[nodiscard]] bool connected() const;

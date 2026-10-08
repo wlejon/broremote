@@ -46,6 +46,14 @@ void draw_test_pattern(uint8_t* rgba, uint32_t width, uint32_t height, uint64_t 
     }
 }
 
+void draw_input_marker(uint8_t* rgba, uint32_t width, uint32_t height, uint32_t presses) {
+    const uint32_t b = kPatternBlock;
+    for (uint32_t i = 0; i < 32; ++i) {
+        const uint8_t v = ((presses >> (31 - i)) & 1) ? 255 : 0;
+        fill_block(rgba, width, height, (3 + i) * b, kInputMarkerRow * b, b, v, v, v);
+    }
+}
+
 int64_t read_test_pattern_counter(const uint8_t* rgba, uint32_t width, uint32_t height, uint32_t stride) {
     const uint32_t b = kPatternBlock;
     if (width < 35 * b || height < b) return -1;

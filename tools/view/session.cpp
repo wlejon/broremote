@@ -1,5 +1,8 @@
 #include "session.h"
 
+#include "picture.h"
+#include "test_pattern.h"
+
 #include <algorithm>
 #include <cstdio>
 
@@ -46,12 +49,50 @@ Session::~Session() {
     if (stream) stream->shutdown();
     if (connector_.joinable()) connector_.join();
     if (decoder_thread_.joinable()) decoder_thread_.join();
+    if (pinger_.joinable()) pinger_.join();
     client_.reset();  // joins the reader (on_closed takes m_, so not under it)
 }
 
 void Session::start(const SessionOptions& options) {
     connector_ = std::thread([this, options] { connect_thread(options); });
     decoder_thread_ = std::thread([this] { decode_thread(); });
+    pinger_ = std::thread([this] { ping_thread(); });
+}
+
+// The round trip and the clock offset, four times a second while connected.
+void Session::ping_thread() {
+    std::unique_lock<std::mutex> lk(m_);
+    for (;;) {
+        cv_.wait_for(lk, std::chrono::milliseconds(250),
+                     [&] { return stopping_ || status_.state == SessionState::Closed; });
+        if (stopping_ || status_.state == SessionState::Closed) return;
+        Client* c = live_;
+        if (!c) continue;
+        lk.unlock();
+        c->ping();
+        lk.lock();
+    }
+}
+
+bool Session::probe() {
+    Client* c = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (status_.state != SessionState::Connected) return false;
+        c = live_;
+    }
+    if (!c) return false;
+    latency_.set_probing(true);
+    if (!latency_.begin_probe(Clock::now())) return false;
+    constexpr uint32_t kKeyF13 = 183;  // evdev KEY_F13: nothing a desktop binds
+    InputEvent e;
+    e.kind = InputKind::Key;
+    e.code = kKeyF13;
+    e.pressed = true;
+    c->send_input(e);
+    e.pressed = false;
+    c->send_input(e);
+    return true;
 }
 
 void Session::close() {
@@ -120,10 +161,15 @@ void Session::connect_thread(SessionOptions options) {
         queue_.push_back(std::move(it));
         cv_.notify_all();
     };
+    h.on_pong = [this](Clock::time_point sent, Clock::time_point received, uint64_t server_us) {
+        latency_.on_pong(sent, received, server_us);
+    };
+    h.on_frame_sent = [this](const FrameSentMsg& f) { latency_.on_frame_sent(f); };
     h.on_video = [this](const VideoPacket& v) {
         Item it;
         it.packet = v;
         it.received = Clock::now();
+        latency_.on_video(v, it.received);
         std::lock_guard<std::mutex> lk(m_);
         queue_.push_back(std::move(it));
         cv_.notify_all();
@@ -295,6 +341,11 @@ void Session::decode_one(Item& item, Client& client) {
         work_.width = std::min(work_.width, config_.width);
         work_.height = std::min(work_.height, config_.height);
     }
+    // While probing, the picture's input marker says which presses it answers.
+    const int64_t marker = latency_.probing()
+                               ? tools::read_block_row(work_, tools::kInputMarkerRow, tools::kPatternBlock)
+                               : -1;
+    latency_.on_decoded(v.frame_id, t0, t1, marker);
     {
         std::lock_guard<std::mutex> lk(frame_m_);
         std::swap(latest_, work_);

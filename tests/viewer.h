@@ -49,6 +49,7 @@ public:
                 cv_.wait_for(lk, std::chrono::seconds(5), [&] { return client_ != nullptr; });
                 c = client_;
                 packets.push_back(v.frame_id);
+                timings.push_back(v.timing);
                 Picture p;
                 p.frame_id = v.frame_id;
                 p.stream_id = v.stream_id;
@@ -78,6 +79,15 @@ public:
             std::lock_guard<std::mutex> lk(m_);
             closed = true;
             closed_reason = why;
+        };
+        h.on_pong = [this](std::chrono::steady_clock::time_point sent, std::chrono::steady_clock::time_point got,
+                           uint64_t server_us) {
+            std::lock_guard<std::mutex> lk(m_);
+            pongs.push_back({sent, got, server_us});
+        };
+        h.on_frame_sent = [this](const FrameSentMsg& f) {
+            std::lock_guard<std::mutex> lk(m_);
+            frames_sent.push_back(f);
         };
         std::string err;
         owned_ = Client::connect(std::move(stream), std::move(h), opts, &err);
@@ -136,6 +146,13 @@ public:
     std::vector<CursorState> cursors;
     std::vector<std::pair<ErrorCode, std::string>> errors;
     std::vector<std::string> decode_errors;
+    std::vector<FrameTiming> timings;  // per packet, in order
+    struct Pong {
+        std::chrono::steady_clock::time_point sent, received;
+        uint64_t server_us;
+    };
+    std::vector<Pong> pongs;
+    std::vector<FrameSentMsg> frames_sent;
     bool closed = false;
     std::string closed_reason;
     std::string connect_error;

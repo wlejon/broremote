@@ -45,6 +45,23 @@ struct Client::Impl {
                 if (h.on_cursor) h.on_cursor(c.state);
                 return true;
             }
+            case MsgType::Pong: {
+                const auto received = std::chrono::steady_clock::now();
+                PongMsg p;
+                if (!p.decode(m.payload)) return bad("Pong", why);
+                // The token is the steady clock (ns) when ping() sent it.
+                const std::chrono::steady_clock::time_point sent{std::chrono::steady_clock::duration(
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::nanoseconds(int64_t(p.token))))};
+                if (h.on_pong) h.on_pong(sent, received, p.server_time_us);
+                return true;
+            }
+            case MsgType::FrameSent: {
+                FrameSentMsg f;
+                if (!f.decode(m.payload)) return bad("FrameSent", why);
+                if (h.on_frame_sent) h.on_frame_sent(f);
+                return true;
+            }
             case MsgType::Error: {
                 ErrorMsg e;
                 if (!e.decode(m.payload)) return bad("Error", why);
@@ -182,6 +199,14 @@ void Client::set_codecs(const std::vector<Codec>& codecs, uint32_t max_bitrate_k
     sc.codecs = codecs;
     sc.max_bitrate_kbps = max_bitrate_kbps;
     impl_->send(sc.encode());
+}
+
+bool Client::ping() {
+    if (impl_->welcome.minor < 1) return false;
+    const auto now = std::chrono::steady_clock::now();
+    PingMsg p;
+    p.token = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+    return impl_->send(p.encode());
 }
 
 bool Client::connected() const { return impl_->open.load(); }

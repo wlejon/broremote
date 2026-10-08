@@ -81,7 +81,8 @@ void Server::submit(const Frame& frame, std::function<void()> release) {
                 ++s.stats.replaced;
                 old.swap(s.pending);
             }
-            s.pending = Pending{frame, std::move(release)};
+            if (s.paused()) ++s.stats.window_waits;
+            s.pending = Pending{frame, std::move(release), Clock::now()};
         }
     }
     if (now) {

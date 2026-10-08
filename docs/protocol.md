@@ -1,4 +1,4 @@
-# broremote wire protocol, version 1.0
+# broremote wire protocol, version 1.1
 
 A viewer and a broremote server talk over one byte stream. Locally that is an AF_UNIX stream socket (on Linux and, for tests and development, on Windows). Remotely it is the stdio of `ssh host broremote proxy`, which relays bytes to the remote host's local socket without reading them. The protocol is the same in every case, and nothing in it depends on the transport.
 
@@ -70,6 +70,7 @@ RequestKeyframe  ------------------>
 | 0x0103 | RequestKeyframe | (empty) — the decoder lost sync; the next frame is a keyframe |
 | 0x0104 | Input | `InputEvent` (below) |
 | 0x0105 | SetCodec | `varint n` (at most 16), `u8 codec` × n (preference order; unknown values are skipped), `varint max_bitrate_kbps` (32-bit; 0 = no limit) |
+| 0x0106 | Ping (1.1) | `u64 token` — answered at once with `Pong`. A client sends it only to a server whose `Welcome` says minor >= 1 |
 
 ### InputEvent
 
@@ -89,9 +90,19 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 |------|------|------|
 | 0x0201 | Welcome | `u16 major`, `u16 minor`, `str server_name` (at most 256 bytes) |
 | 0x0202 | StreamConfig | `varint stream_id`, `u8 codec`, `varint width`, `varint height` (1..16384 each), `varint fps` (a hint) |
-| 0x0203 | Video | `varint stream_id`, `varint frame_id`, `svarint pts_ns`, `u8 flags` (bit 0 keyframe; other bits ignored), `bytes bitstream` |
+| 0x0203 | Video | `varint stream_id`, `varint frame_id`, `svarint pts_ns`, `u8 flags` (bit 0 keyframe; other bits ignored), `bytes bitstream`; 1.1 appends `varint submit_us`, `varint queue_us`, `varint encode_us` (below) |
 | 0x0204 | Cursor | `bool visible`, `svarint x`, `svarint y` (32-bit, stream pixels), `varint hotspot_x`, `varint hotspot_y`, `str shape` (a CSS cursor name, at most 64 bytes) |
 | 0x0205 | Error | `u16 code`, `str message` (at most 4096 bytes) |
+| 0x0206 | Pong (1.1) | `u64 token` (the Ping's), `u64 server_time_us` (the server's monotonic clock when it answered) |
+| 0x0207 | FrameSent (1.1) | `varint frame_id`, `varint wait_us`, `varint write_us` |
+
+### Timing (1.1)
+
+So a viewer can tell where a frame's age comes from:
+
+- **Ping / Pong.** The server answers a `Ping` on its I/O thread as soon as it reads it, and queues the `Pong` ahead of any queued video (after a message already partly written, which must finish first), so the round trip is the transport's. The token is the client's (a viewer sends its own clock). With the send and receive times, `server_time_us` gives the offset between the two clocks; the sample with the smallest round trip is the least skewed.
+- **Video timing.** After the bitstream: `submit_us`, the server clock when the host submitted the frame; `queue_us`, from then to the encode starting (the encoder busy, or the ack window shut); `encode_us`, the conversion and encode. A 1.0 server sends none (the body ends at the bitstream); when present the three are whole, and a body that ends partway through them is malformed.
+- **FrameSent.** Sent to a client whose `Hello` said minor >= 1, once the last byte of a `Video` was written to that client's socket: `wait_us` from the packet being queued for the client to its first byte being written, `write_us` from the first byte to the last (socket backpressure). It follows the `Video` it describes.
 
 Codecs:
 

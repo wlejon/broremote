@@ -26,7 +26,10 @@ int usage() {
                  "  --timeout S         with --frames: fail if they have not been shown in S seconds\n"
                  "  --dump-png FILE     write the last picture shown to FILE on exit\n"
                  "  --check-pattern     compare the last picture with broremote serve-test's pattern\n"
-                 "  --hidden            no visible window\n");
+                 "  --hidden            no visible window\n"
+                 "  --stats             print where each second's frames spent their time\n"
+                 "  --latency-test N    against `broremote serve-test --latency`: send N key presses,\n"
+                 "                      time each to the picture that answers it, report and exit\n");
     return 2;
 }
 
@@ -52,6 +55,10 @@ int main(int argc, char** argv) {
             o.fullscreen = true;
         } else if (!std::strcmp(a, "--no-vsync")) {
             o.vsync = false;
+        } else if (!std::strcmp(a, "--stats")) {
+            o.stats = true;
+        } else if (!std::strcmp(a, "--latency-test") && has) {
+            if (!parse_uint(argv[++i], o.latency_probes) || o.latency_probes == 0) return usage();
         } else if (!std::strcmp(a, "--hidden")) {
             o.hidden = true;
         } else if (!std::strcmp(a, "--check-pattern")) {

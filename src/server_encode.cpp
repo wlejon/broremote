@@ -39,6 +39,7 @@ void Server::Impl::encode_loop() {
         const Codec codec = want_codec;
         const uint32_t kbps = want_kbps;
         lk.unlock();
+        const Clock::time_point encode_start = Clock::now();
 
         ReleaseOnce release(std::move(p.release));
         std::string err;
@@ -58,6 +59,12 @@ void Server::Impl::encode_loop() {
         EncodedPacket pkt;
         if (ok) ok = encoder->encode(f, keyframe, [&release] { release.run(); }, pkt, &err);
         release.run();
+        const Clock::time_point encode_end = Clock::now();
+        FrameTiming timing;
+        timing.valid = true;
+        timing.submit_us = mono_us(p.submitted);
+        timing.queue_us = span_us(p.submitted, encode_start);
+        timing.encode_us = span_us(encode_start, encode_end);
 
         lk.lock();
         if (!ok) {
@@ -87,15 +94,17 @@ void Server::Impl::encode_loop() {
         }
         const uint64_t id = next_frame_id++;
         const SharedMessage msg = std::make_shared<const std::string>(
-            VideoPacket::encode_message(stream->stream_id, id, pkt.pts_ns, pkt.keyframe, pkt.data));
+            VideoPacket::encode_message(stream->stream_id, id, pkt.pts_ns, pkt.keyframe, pkt.data, &timing));
         // A client that has not had a keyframe of this stream cannot use a
         // predicted frame: it skips them until the next keyframe (which its
         // joining already requested).
+        const Clock::time_point queued = Clock::now();
         for (auto& c : clients) {
             if (!c->attached || c->closing || c->dead) continue;
             if (!pkt.keyframe && !c->synced) continue;
             c->synced = true;
             queue(*c, msg);
+            if (c->minor >= 1 && !c->dead) c->marks.push_back({msg.get(), id, queued});
             c->unacked.push_back(id);
         }
         ++stats.encoded;

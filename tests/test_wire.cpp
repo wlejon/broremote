@@ -324,6 +324,59 @@ void test_messages() {
         w.varint(uint64_t(1) << 40);
         w.raw("xx");
         CHECK(!b.decode(w.data()));
+        CHECK(!b.timing.valid);  // a 1.0 body: no timing
+    }
+    {
+        // 1.1: timing after the bitstream. Whole or malformed; trailing bytes after it ignored.
+        VideoPacket a;
+        a.stream_id = 1;
+        a.frame_id = 2;
+        a.data = {9, 9, 9};
+        a.timing.valid = true;
+        a.timing.submit_us = 123456789012ull;
+        a.timing.queue_us = 300;
+        a.timing.encode_us = 4100;
+        const std::string framed = a.encode();
+        auto m = unframe(framed, st);
+        VideoPacket b;
+        CHECK(b.decode(m.payload));
+        CHECK(b.timing == a.timing);
+        CHECK(b.data == a.data);
+        VideoPacket plain = a;
+        plain.timing = FrameTiming{};
+        std::string st2;
+        const size_t body10 = unframe(plain.encode(), st2).payload.size();
+        for (size_t n = body10 + 1; n < m.payload.size(); ++n) CHECK(!b.decode(m.payload.substr(0, n)));
+        std::string longer(m.payload);
+        longer += "later minor";
+        CHECK(b.decode(longer));
+        CHECK(b.timing == a.timing);
+    }
+    {
+        PingMsg a{0x0102030405060708ull};
+        auto m = unframe(a.encode(), st);
+        CHECK_EQ(m.type, uint16_t(MsgType::Ping));
+        PingMsg b;
+        CHECK(b.decode(m.payload));
+        CHECK_EQ(b.token, a.token);
+        check_truncations<PingMsg>(a.encode());
+        PongMsg c{77, 1234567};
+        m = unframe(c.encode(), st);
+        CHECK_EQ(m.type, uint16_t(MsgType::Pong));
+        PongMsg d;
+        CHECK(d.decode(m.payload));
+        CHECK_EQ(d.token, uint64_t(77));
+        CHECK_EQ(d.server_time_us, uint64_t(1234567));
+        check_truncations<PongMsg>(c.encode());
+        FrameSentMsg e{42, 1500, 80};
+        m = unframe(e.encode(), st);
+        CHECK_EQ(m.type, uint16_t(MsgType::FrameSent));
+        FrameSentMsg f;
+        CHECK(f.decode(m.payload));
+        CHECK_EQ(f.frame_id, uint64_t(42));
+        CHECK_EQ(f.wait_us, uint64_t(1500));
+        CHECK_EQ(f.write_us, uint64_t(80));
+        check_truncations<FrameSentMsg>(e.encode());
     }
     {
         CursorMsg a;
@@ -367,6 +420,9 @@ void test_fuzz() {
         VideoPacket().decode(body);
         CursorMsg().decode(body);
         ErrorMsg().decode(body);
+        PingMsg().decode(body);
+        PongMsg().decode(body);
+        FrameSentMsg().decode(body);
     }
     CHECK(true);
 }

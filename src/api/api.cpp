@@ -153,6 +153,7 @@ Value statusObject() {
     stats.set("unwatched", static_cast<double>(s.unwatched));
     stats.set("failed", static_cast<double>(s.failed));
     stats.set("streams", static_cast<double>(s.streams));
+    stats.set("windowWaits", static_cast<double>(s.window_waits));
     st.set("stats", stats.get());
     return st.get();
 }

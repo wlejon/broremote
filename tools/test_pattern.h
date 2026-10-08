@@ -20,4 +20,10 @@ void draw_test_pattern(uint8_t* rgba, uint32_t width, uint32_t height, uint64_t 
 // counter blocks); -1 when the picture is too small to hold it.
 int64_t read_test_pattern_counter(const uint8_t* rgba, uint32_t width, uint32_t height, uint32_t stride);
 
+// serve-test --latency: a second row of 32 blocks under the counter carries
+// the number of key / button presses the server has received, so a viewer
+// can see when the picture answers its input (row 1, the same layout).
+inline constexpr uint32_t kInputMarkerRow = 1;
+void draw_input_marker(uint8_t* rgba, uint32_t width, uint32_t height, uint32_t presses);
+
 }  // namespace broremote::tools

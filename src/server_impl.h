@@ -46,12 +46,31 @@ struct ClientConn {
     bool closing = false;           // flush what is queued (an Error), then drop it
     Clock::time_point close_deadline{};
     std::string name;
+    uint16_t minor = 0;             // the protocol minor the client's Hello said
+    // Video messages in `out` whose FrameSent is owed (minor >= 1), oldest
+    // first; `msg` identifies the message while it is still queued.
+    struct SentMark {
+        const std::string* msg = nullptr;
+        uint64_t frame_id = 0;
+        Clock::time_point queued{};
+    };
+    std::deque<SentMark> marks;
+    Clock::time_point front_started{};  // when out.front()'s first byte was written
 };
 
 struct Pending {
     Frame frame;
     std::function<void()> release;
+    Clock::time_point submitted{};
 };
+
+// The server's clock as the protocol carries it (Pong, FrameTiming).
+inline uint64_t mono_us(Clock::time_point t) {
+    return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count());
+}
+inline uint64_t span_us(Clock::time_point a, Clock::time_point b) {
+    return b > a ? uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count()) : 0;
+}
 
 struct Server::Impl {
     ServerConfig cfg;

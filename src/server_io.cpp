@@ -121,6 +121,7 @@ void Server::Impl::read_client(ClientConn& c) {
 void Server::Impl::flush_client(ClientConn& c) {
     while (!c.out.empty()) {
         const std::string& front = *c.out.front();
+        if (c.out_offset == 0) c.front_started = Clock::now();
         const long n = net::send_some(c.sock, front.data() + c.out_offset, front.size() - c.out_offset);
         if (n == -1) return;  // the socket buffer is full; poll says when to go on
         if (n < 0) {
@@ -129,9 +130,20 @@ void Server::Impl::flush_client(ClientConn& c) {
         }
         c.out_offset += size_t(n);
         if (c.out_offset == front.size()) {
+            const std::string* done = c.out.front().get();
             c.out_bytes -= front.size();
             c.out.pop_front();
             c.out_offset = 0;
+            if (!c.marks.empty() && c.marks.front().msg == done) {
+                // The whole Video message is in the socket: say how long it waited and took.
+                const ClientConn::SentMark mark = c.marks.front();
+                c.marks.pop_front();
+                FrameSentMsg fs;
+                fs.frame_id = mark.frame_id;
+                fs.wait_us = span_us(mark.queued, c.front_started);
+                fs.write_us = span_us(c.front_started, Clock::now());
+                queue(c, shared(fs.encode()));
+            }
         }
     }
 }
@@ -142,6 +154,7 @@ void Server::Impl::drop_unsent(ClientConn& c) {
     if (c.out_offset == 0) c.out.clear();
     else c.out.erase(c.out.begin() + 1, c.out.end());
     c.out_bytes = c.out.empty() ? 0 : c.out.front()->size();
+    c.marks.clear();
 }
 
 void Server::Impl::close_client(ClientConn& c, ErrorCode code, const std::string& message) {
@@ -210,6 +223,17 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
         case MsgType::SetCodec:
             handle_set_codec(c, payload);
             return;
+        case MsgType::Ping: {
+            PingMsg p;
+            if (!p.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Ping");
+            // Ahead of queued video (after a message partly written, which
+            // must finish first), so the round trip is the transport's.
+            SharedMessage pong = shared(PongMsg{p.token, mono_us(Clock::now())}.encode());
+            if (c.dead || c.closing) return;
+            c.out_bytes += pong->size();
+            c.out.insert(c.out.begin() + (c.out_offset > 0 ? 1 : 0), std::move(pong));
+            return;
+        }
         default:
             queue(c, shared(ErrorMsg{ErrorCode::UnknownMessage, "unknown message type " + std::to_string(type)}.encode()));
             return;
@@ -225,6 +249,7 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
                                 std::to_string(h.major) + "." + std::to_string(h.minor));
     }
     c.name = h.name;
+    c.minor = h.minor;
     c.attached = true;
     attached.fetch_add(1);
     queue(c, shared(WelcomeMsg{kProtocolMajor, kProtocolMinor, cfg.name}.encode()));

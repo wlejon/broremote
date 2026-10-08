@@ -24,6 +24,8 @@ struct ViewerOptions {
     std::string dump_png;       // write the last displayed picture here on exit
     bool check_pattern = false; // compare the last picture with broremote serve-test's pattern
     bool vsync = true;
+    bool stats = false;         // a timing breakdown line on stderr every second
+    uint32_t latency_probes = 0;  // send this many latency probes (serve-test --latency), report, exit
     bool fullscreen = false;
     bool hidden = false;        // no visible window (tests)
     int width = 0, height = 0;  // the initial window size (0: fit the stream once it is known)
@@ -48,6 +50,7 @@ public:
     [[nodiscard]] SDL_Window* window() const { return window_; }
     [[nodiscard]] Session& session() { return *session_; }
     [[nodiscard]] uint64_t displayed() const { return displayed_; }
+    [[nodiscard]] bool probing() const { return opt_.latency_probes > 0; }
     [[nodiscard]] const InputMapper& mapper() const { return mapper_; }
     [[nodiscard]] const DecodedFrame* frame() const { return have_frame_ ? &frame_ : nullptr; }
 
@@ -83,6 +86,14 @@ private:
     bool swallow_enter_ = false;
     uint64_t displayed_ = 0;
     std::vector<double> latency_ms_;  // packet received -> presented
+
+    void run_probes(Clock::time_point now);
+    std::string timing_text(const LatencyWindow& w) const;
+
+    LatencyWindow last_window_;
+    Clock::time_point next_probe_{};
+    uint64_t probes_sent_ = 0;
+    std::vector<LatencyWindow> windows_;  // one per second, for the closing report
 
     SessionStatus shown_status_;
     std::string title_;

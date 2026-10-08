@@ -176,18 +176,25 @@ bool StreamConfig::decode(std::string_view payload) {
 }
 
 std::string VideoPacket::encode_message(uint64_t stream_id, uint64_t frame_id, int64_t pts_ns, bool keyframe,
-                                        std::span<const uint8_t> data) {
+                                        std::span<const uint8_t> data, const FrameTiming* timing) {
     wire::Writer w;
-    w.data().reserve(data.size() + 32);
+    w.data().reserve(data.size() + 48);
     w.varint(stream_id);
     w.varint(frame_id);
     w.svarint(pts_ns);
     w.u8(keyframe ? 1 : 0);
     w.bytes(data.data(), data.size());
+    if (timing && timing->valid) {
+        w.varint(timing->submit_us);
+        w.varint(timing->queue_us);
+        w.varint(timing->encode_us);
+    }
     return message(MsgType::Video, w);
 }
 
-std::string VideoPacket::encode() const { return encode_message(stream_id, frame_id, pts_ns, keyframe, data); }
+std::string VideoPacket::encode() const {
+    return encode_message(stream_id, frame_id, pts_ns, keyframe, data, &timing);
+}
 
 bool VideoPacket::decode(std::string_view payload) {
     wire::Reader r(payload);
@@ -197,6 +204,56 @@ bool VideoPacket::decode(std::string_view payload) {
     const uint8_t flags = r.u8();  // bits other than 0 are a later minor's: ignored
     keyframe = (flags & 1) != 0;
     data = r.bytes();
+    timing = FrameTiming{};
+    // 1.1's timing: absent from a 1.0 server, whole when present.
+    if (r.ok() && r.remaining() > 0) {
+        timing.submit_us = r.varint();
+        timing.queue_us = r.varint();
+        timing.encode_us = r.varint();
+        timing.valid = r.ok();
+    }
+    return r.ok();
+}
+
+std::string PingMsg::encode() const {
+    wire::Writer w;
+    w.u64(token);
+    return message(MsgType::Ping, w);
+}
+
+bool PingMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    token = r.u64();
+    return r.ok();
+}
+
+std::string PongMsg::encode() const {
+    wire::Writer w;
+    w.u64(token);
+    w.u64(server_time_us);
+    return message(MsgType::Pong, w);
+}
+
+bool PongMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    token = r.u64();
+    server_time_us = r.u64();
+    return r.ok();
+}
+
+std::string FrameSentMsg::encode() const {
+    wire::Writer w;
+    w.varint(frame_id);
+    w.varint(wait_us);
+    w.varint(write_us);
+    return message(MsgType::FrameSent, w);
+}
+
+bool FrameSentMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    frame_id = r.varint();
+    wait_us = r.varint();
+    write_us = r.varint();
     return r.ok();
 }
 

@@ -27,7 +27,8 @@ namespace broremote {
 
 inline constexpr char kProtocolMagic[4] = {'B', 'R', 'R', 'M'};
 inline constexpr uint16_t kProtocolMajor = 1;
-inline constexpr uint16_t kProtocolMinor = 0;
+// 1.1 added Ping / Pong, FrameSent and the timing fields at the end of Video.
+inline constexpr uint16_t kProtocolMinor = 1;
 
 // Limits a decoder enforces on what a peer sends.
 inline constexpr size_t kMaxNameBytes = 256;        // Hello / Welcome names
@@ -43,12 +44,15 @@ enum class MsgType : uint16_t {
     RequestKeyframe = 0x0103,
     Input = 0x0104,
     SetCodec = 0x0105,
+    Ping = 0x0106,       // 1.1
     // server -> client
     Welcome = 0x0201,
     StreamConfig = 0x0202,
     Video = 0x0203,
     Cursor = 0x0204,
     Error = 0x0205,
+    Pong = 0x0206,       // 1.1
+    FrameSent = 0x0207,  // 1.1
 };
 
 enum class ErrorCode : uint16_t {
@@ -101,7 +105,32 @@ struct SetCodecMsg {
     bool decode(std::string_view payload);
 };
 
+// 1.1. The server answers at once, on its I/O thread, ahead of any queued
+// video, so the round trip is the transport's own.
+struct PingMsg {
+    uint64_t token = 0;  // echoed in the Pong (a viewer sends its clock)
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
 // ---- server -> client ---------------------------------------------------------------
+
+struct PongMsg {
+    uint64_t token = 0;           // the Ping's
+    uint64_t server_time_us = 0;  // the server's monotonic clock when it answered
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
+// 1.1, to clients that said minor >= 1 in Hello: sent once the last byte of
+// a Video message was handed to that client's socket.
+struct FrameSentMsg {
+    uint64_t frame_id = 0;
+    uint64_t wait_us = 0;   // the packet was queued for this client -> its first byte was written
+    uint64_t write_us = 0;  // first byte written -> last byte written (socket backpressure)
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
 
 struct WelcomeMsg {
     uint16_t major = kProtocolMajor;
@@ -124,17 +153,30 @@ struct StreamConfig {
     bool operator==(const StreamConfig&) const = default;
 };
 
+// Where a frame spent its time on the server (1.1, after the bitstream).
+// Times are microseconds; submit_us is on the server's monotonic clock (the
+// one Pong reports), so a viewer that knows the clock offset can place the
+// frame on its own timeline.
+struct FrameTiming {
+    bool valid = false;      // false: a 1.0 server sent no timing
+    uint64_t submit_us = 0;  // Server::submit() was called
+    uint64_t queue_us = 0;   // submit -> encode start (waiting for the encoder or the ack window)
+    uint64_t encode_us = 0;  // encode start -> packet ready (conversion and encode)
+    bool operator==(const FrameTiming&) const = default;
+};
+
 struct VideoPacket {
     uint64_t stream_id = 0;
     uint64_t frame_id = 0;  // increments per packet across streams; the client acks it
     int64_t pts_ns = 0;
     bool keyframe = false;
     std::vector<uint8_t> data;
+    FrameTiming timing;
     [[nodiscard]] std::string encode() const;
     bool decode(std::string_view payload);
     // Encode straight from a bitstream, without building a VideoPacket.
     static std::string encode_message(uint64_t stream_id, uint64_t frame_id, int64_t pts_ns, bool keyframe,
-                                      std::span<const uint8_t> data);
+                                      std::span<const uint8_t> data, const FrameTiming* timing = nullptr);
 };
 
 struct CursorMsg {

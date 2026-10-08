@@ -216,6 +216,7 @@ if(BROREMOTE_BUILD_VIEWER)
         tools/view/keymap.cpp
         tools/view/input_map.cpp
         tools/view/session.cpp
+        tools/view/latency.cpp
         tools/view/viewer_app.cpp
         tools/view/png.cpp
         tools/connect.cpp

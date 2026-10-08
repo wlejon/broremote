@@ -87,6 +87,7 @@ public:
         uint64_t unwatched = 0;   // released unencoded: no client attached
         uint64_t failed = 0;      // released unencoded: the encoder failed
         uint64_t streams = 0;     // StreamConfigs made (one per reconfigure)
+        uint64_t window_waits = 0;  // frames submitted while a client was at its ack window (they wait)
     };
     [[nodiscard]] Stats stats() const;
 

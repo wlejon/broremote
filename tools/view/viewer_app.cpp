@@ -206,10 +206,43 @@ void Viewer::draw() {
     SDL_RenderPresent(renderer_);
 }
 
+std::string Viewer::timing_text(const LatencyWindow& w) const {
+    if (!w.frames) return w.rtt >= 0 ? "rtt " + std::to_string(w.rtt) + " ms, no frame timing" : "no timing yet";
+    char buf[320];
+    std::snprintf(buf, sizeof buf,
+                  "rtt %.2f | server: queue %.2f encode %.2f wait %.2f | net %.2f | dwait %.2f decode %.2f | "
+                  "present %.2f | age %.1f (max %.1f) ms, %.1f kB/frame",
+                  w.rtt, w.queue, w.encode, w.wait, w.net, w.dwait, w.decode, w.present, w.age, w.max_age,
+                  w.kbytes);
+    return buf;
+}
+
+// One probe at a time, a quarter second or so apart (jittered so the probes
+// do not lock to the frame rate), once pictures are flowing.
+void Viewer::run_probes(Clock::time_point now) {
+    if (!opt_.latency_probes || probes_sent_ >= opt_.latency_probes || displayed_ < 30) return;
+    if (now < next_probe_ || session_->latency().probe_open(now)) return;
+    if (session_->probe()) {
+        ++probes_sent_;
+        next_probe_ = now + std::chrono::milliseconds(200 + int(probes_sent_ * 37 % 67));
+    } else {
+        next_probe_ = now + std::chrono::milliseconds(100);
+    }
+}
+
 void Viewer::update_title(bool force) {
     const auto now = Clock::now();
     const double since = std::chrono::duration<double>(now - title_time_).count();
     if (!force && since < 1.0) return;
+    if (since >= 1.0) {
+        last_window_ = session_->latency().take_window();
+        if (last_window_.frames) windows_.push_back(last_window_);
+        if (opt_.stats && shown_status_.state == SessionState::Connected) {
+            std::fprintf(stderr, "broremote-view: %.1f fps, %s\n",
+                         since > 0 ? double(displayed_ - title_displayed_) / since : 0.0,
+                         timing_text(last_window_).c_str());
+        }
+    }
     const SessionStatus& s = shown_status_;
     const std::string where = opt_.session.target.describe();
     std::string t = "broremote-view - " + where;
@@ -229,6 +262,13 @@ void Viewer::update_title(bool force) {
         std::snprintf(buf, sizeof buf, " - %s %ux%u - %.1f fps - decode %.1f ms", codec_name(s.config.codec),
                       s.config.width, s.config.height, fps, mean(recent));
         t += buf;
+        if (last_window_.frames) {
+            std::snprintf(buf, sizeof buf, " - age %.1f ms (rtt %.1f, server %.1f, net %.1f, present %.1f)",
+                          last_window_.age, last_window_.rtt,
+                          last_window_.queue + last_window_.encode + last_window_.wait, last_window_.net,
+                          last_window_.present);
+            t += buf;
+        }
         if (!s.decoder.empty()) t += " - " + s.decoder;
         if (!s.message.empty()) t += " - " + s.message;
     }
@@ -267,13 +307,20 @@ bool Viewer::step(int timeout_ms) {
         draw();
         need_draw_ = false;
         if (have_frame_ && info_.sequence) {
-            latency_ms_.push_back(std::chrono::duration<double, std::milli>(Clock::now() - info_.received).count());
+            const auto presented = Clock::now();
+            latency_ms_.push_back(std::chrono::duration<double, std::milli>(presented - info_.received).count());
+            session_->note_presented(info_.frame_id, presented);
             info_.sequence = 0;  // count each picture once
         }
     }
     update_title(false);
+    run_probes(Clock::now());
 
     if (quit_ || st.state == SessionState::Closed) return false;
+    if (opt_.latency_probes && session_->latency().probes().size() + session_->latency().probes_lost() >=
+                                   opt_.latency_probes) {
+        return false;
+    }
     if (opt_.frames && displayed_ >= opt_.frames) return false;
     if (opt_.timeout_s > 0 &&
         std::chrono::duration<double>(Clock::now() - start_).count() > opt_.timeout_s) {
@@ -312,6 +359,69 @@ int Viewer::finish() {
                      static_cast<unsigned long long>(displayed_), fps, mbps, mean(stats.decode_ms),
                      percentile(stats.decode_ms, 0.5), percentile(stats.decode_ms, 0.99), mean(latency_ms_),
                      percentile(latency_ms_, 0.5), percentile(latency_ms_, 0.99));
+    }
+    if (!windows_.empty()) {
+        // The per-second means, averaged (weighted by frames).
+        LatencyWindow all;
+        double n = 0;
+        for (const LatencyWindow& w : windows_) {
+            const double k = double(w.frames);
+            n += k;
+            all.queue += w.queue * k;
+            all.encode += w.encode * k;
+            all.wait += w.wait * k;
+            all.net += w.net * k;
+            all.dwait += w.dwait * k;
+            all.decode += w.decode * k;
+            all.present += w.present * k;
+            all.age += w.age * k;
+            all.kbytes += w.kbytes * k;
+            all.max_age = std::max(all.max_age, w.max_age);
+        }
+        for (double* v : {&all.queue, &all.encode, &all.wait, &all.net, &all.dwait, &all.decode, &all.present,
+                          &all.age, &all.kbytes})
+            *v /= n;
+        all.frames = uint64_t(n);
+        all.rtt = session_->latency().rtt_ms();
+        std::fprintf(stderr, "  timing over %llu frames: %s\n", static_cast<unsigned long long>(all.frames),
+                     timing_text(all).c_str());
+    }
+    if (opt_.latency_probes) {
+        const std::vector<Probe> ps = session_->latency().probes();
+        const uint64_t lost = session_->latency().probes_lost();
+        if (ps.empty()) {
+            std::fprintf(stderr, "broremote-view: no latency probe was answered (%llu lost); is the server "
+                                 "`broremote serve-test --latency`?\n",
+                         static_cast<unsigned long long>(lost));
+            rc = 1;
+        } else {
+            std::vector<double> dec, pres;
+            Probe m;
+            for (const Probe& p : ps) {
+                dec.push_back(p.total_decoded);
+                pres.push_back(p.total_presented);
+                m.uplink += p.uplink;
+                m.queue += p.queue;
+                m.encode += p.encode;
+                m.wait += p.wait;
+                m.net += p.net;
+                m.dwait += p.dwait;
+                m.decode += p.decode;
+                m.present += p.present;
+                m.rtt += p.rtt;
+            }
+            const double k = double(ps.size());
+            std::fprintf(stderr,
+                         "broremote-view: %zu latency probes (%llu lost)\n"
+                         "  input -> decoded:   mean %.2f, p50 %.2f, p90 %.2f, max %.2f ms\n"
+                         "  input -> presented: mean %.2f, p50 %.2f, p90 %.2f, max %.2f ms\n"
+                         "  mean parts: uplink+react %.2f | queue %.2f encode %.2f wait %.2f | net %.2f | "
+                         "dwait %.2f decode %.2f | present %.2f ms (rtt %.2f)\n",
+                         ps.size(), static_cast<unsigned long long>(lost), mean(dec), percentile(dec, 0.5),
+                         percentile(dec, 0.9), percentile(dec, 1.0), mean(pres), percentile(pres, 0.5),
+                         percentile(pres, 0.9), percentile(pres, 1.0), m.uplink / k, m.queue / k, m.encode / k,
+                         m.wait / k, m.net / k, m.dwait / k, m.decode / k, m.present / k, m.rtt / k);
+        }
     }
     if (opt_.frames && displayed_ < opt_.frames && !timed_out_) rc = 1;
     if ((!opt_.dump_png.empty() || opt_.check_pattern) && !have_frame_) {
@@ -396,7 +506,8 @@ int run_viewer(const ViewerOptions& options) {
         std::fprintf(stderr, "broremote-view: %s\n", err.c_str());
         return 1;
     }
-    while (v.step(100)) {
+    // Probing wakes often to send each probe on time; otherwise events wake it.
+    while (v.step(v.probing() ? 2 : 100)) {
     }
     return v.finish();
 }

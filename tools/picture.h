@@ -39,6 +39,28 @@ inline std::vector<uint8_t> to_rgba(const DecodedFrame& f) {
     return out;
 }
 
+// A row of 32 one-bit blocks of `block` pixels starting at x = 3 * block,
+// y = row * block (the test pattern's counter, row 0, and its input marker,
+// row 1), read straight from the decoded picture: luma for NV12, so no
+// conversion. -1 when the picture is too small.
+inline int64_t read_block_row(const DecodedFrame& f, uint32_t row, uint32_t block) {
+    if (f.width < 35 * block || f.height < (row + 1) * block || f.data.empty()) return -1;
+    const size_t y = size_t(row) * block + block / 2;
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < 32; ++i) {
+        const size_t x = size_t(3 + i) * block + block / 2;
+        int lum = 0;
+        if (f.format == PixelFormat::NV12) {
+            lum = f.data[y * f.stride + x];  // limited range: black 16, white 235
+        } else {
+            const uint8_t* p = f.data.data() + y * f.stride + x * 4;
+            lum = (p[0] + p[1] + p[2]) / 3;
+        }
+        v = (v << 1) | (lum >= 128 ? 1u : 0u);
+    }
+    return int64_t(v);
+}
+
 // PSNR in dB between two RGBA pictures of the same size, over R, G and B.
 inline double psnr_rgba(const uint8_t* a, const uint8_t* b, uint32_t width, uint32_t height) {
     double se = 0;

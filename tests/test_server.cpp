@@ -472,6 +472,12 @@ struct RawPeer {
         }
         return false;
     }
+    size_t count(MsgType type) {
+        std::lock_guard<std::mutex> lk(m);
+        size_t n = 0;
+        for (auto& [t, p] : msgs) n += MsgType(t) == type ? 1 : 0;
+        return n;
+    }
 };
 
 void test_protocol_errors() {
@@ -548,6 +554,72 @@ void test_protocol_errors() {
     v.close();
 }
 
+void test_timing() {
+    const std::string name = unique_name("timing");
+    auto server = make_server(name);
+    if (!server) {
+        CHECK(false);
+        return;
+    }
+    FrameSource src;
+    check::phase("1.1: ping / pong, frame timing, FrameSent");
+    {
+        Viewer v;
+        CHECK(v.open(dial(name)));
+        CHECK_EQ(v.client().welcome().minor, kProtocolMinor);
+        WAIT(server->client_count() == 1, 5000);
+        CHECK(v.client().ping());
+        WAIT(v.with([&] { return v.pongs.size(); }) == 1, 5000);
+        const auto pong = v.with([&] { return v.pongs.front(); });
+        CHECK(pong.sent <= pong.received);
+        CHECK(pong.server_us > 0);
+        for (uint32_t i = 0; i < 3; ++i) {
+            src.submit(*server, 32, 16, i);
+            WAIT(v.with([&] { return v.frames_sent.size(); }) == i + 1, 5000);
+        }
+        CHECK(v.client().ping());
+        WAIT(v.with([&] { return v.pongs.size(); }) == 2, 5000);
+        const uint64_t later_us = v.with([&] { return v.pongs.back().server_us; });
+        v.with([&] {
+            CHECK_EQ(v.timings.size(), size_t(3));
+            for (size_t i = 0; i < v.timings.size() && i < v.frames_sent.size(); ++i) {
+                const FrameTiming& t = v.timings[i];
+                CHECK(t.valid);
+                CHECK(t.submit_us >= pong.server_us && t.submit_us <= later_us);
+                CHECK(t.queue_us < 5000000 && t.encode_us < 5000000);
+                CHECK_EQ(v.frames_sent[i].frame_id, uint64_t(i + 1));
+                CHECK(v.frames_sent[i].wait_us < 5000000);
+            }
+            return 0;
+        });
+    }
+    check::phase("1.0 client: no FrameSent; a frame at the shut window waits and is counted");
+    WAIT(server->client_count() == 0, 5000);
+    {
+        RawPeer p(dial(name));
+        HelloMsg h;
+        h.minor = 0;
+        p.s->write(h.encode());
+        WAIT(p.got(MsgType::Welcome), 5000);
+        WAIT(server->client_count() == 1, 5000);
+        const uint64_t waits = server->stats().window_waits;
+        src.submit(*server, 32, 16, 7);
+        WAIT(p.count(MsgType::Video) == 1, 5000);
+        src.submit(*server, 32, 16, 8);
+        WAIT(p.count(MsgType::Video) == 2, 5000);
+        src.submit(*server, 32, 16, 9);  // two unacked: the window is shut
+        settle(100);
+        CHECK_EQ(p.count(MsgType::Video), size_t(2));
+        CHECK_EQ(server->stats().window_waits, waits + 1);
+        CHECK_EQ(p.count(MsgType::FrameSent), size_t(0));
+        p.s->write(AckMsg{100}.encode());
+        WAIT(p.count(MsgType::Video) == 3, 5000);
+        CHECK_EQ(p.count(MsgType::FrameSent), size_t(0));
+    }
+    server.reset();
+    CHECK(src.all_released_once());
+}
+
 void test_client_side() {
     check::phase("client: connect failures");
     std::string err;
@@ -611,6 +683,7 @@ int main() {
     test_input_and_cursor();
     test_codec_negotiation();
     test_protocol_errors();
+    test_timing();
     test_client_side();
     return check::finish();
 }

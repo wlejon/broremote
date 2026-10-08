@@ -9,6 +9,7 @@
 
 #include "broremote/client.h"
 #include "connect.h"
+#include "latency.h"
 
 #include <atomic>
 #include <chrono>
@@ -22,8 +23,6 @@
 #include <vector>
 
 namespace broremote::view {
-
-using Clock = std::chrono::steady_clock;
 
 struct SessionOptions {
     tools::ConnectTarget target;
@@ -80,6 +79,13 @@ public:
     void send_input(const InputEvent& e);
     [[nodiscard]] SessionStats stats() const;
 
+    // Timing: the render thread reports each picture it presented; probes
+    // (serve-test --latency) send a key press and wait for the answer.
+    [[nodiscard]] LatencyTracker& latency() { return latency_; }
+    void note_presented(uint64_t frame_id, Clock::time_point when) { latency_.on_presented(frame_id, when); }
+    // Sends one probe (a press and release of KEY_F13) when none is open. False otherwise.
+    bool probe();
+
 private:
     struct Item {
         bool is_config = false;
@@ -90,12 +96,14 @@ private:
 
     void connect_thread(SessionOptions options);
     void decode_thread();
+    void ping_thread();
     void decode_one(Item& item, Client& client);
     void on_closed(const std::string& why);
     void set_status(const std::function<void(SessionStatus&)>& f);
 
     std::function<void()> wake_;
-    std::thread connector_, decoder_thread_;
+    std::thread connector_, decoder_thread_, pinger_;
+    LatencyTracker latency_;
 
     mutable std::mutex m_;           // status, the client pointer, the queue
     std::condition_variable cv_;
