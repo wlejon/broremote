@@ -22,6 +22,8 @@ std::unique_ptr<Encoder> create_vaapi_encoder(Codec, const EncoderConfig&, std::
 // src/mf: the codecs this machine's Media Foundation can decode, and a decoder.
 std::vector<Codec> mf_decoders();
 std::unique_ptr<Decoder> create_mf_decoder(Codec, std::string* err);
+// Why the probe found a codec unusable (empty when it is usable).
+std::string mf_unavailable_reason(Codec);
 #endif
 
 }  // namespace broremote::detail

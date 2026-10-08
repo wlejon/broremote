@@ -265,8 +265,16 @@ int cmd_codecs() {
     std::printf("encode:");
     for (Codec c : available_encoders()) std::printf(" %s", codec_name(c));
     std::printf("\ndecode:");
-    for (Codec c : available_decoders()) std::printf(" %s", codec_name(c));
+    const std::vector<Codec> decoders = available_decoders();
+    for (Codec c : decoders) std::printf(" %s", codec_name(c));
     std::printf("\n");
+    // How each real codec decodes here, or why it does not.
+    for (Codec c : {Codec::H264, Codec::HEVC, Codec::AV1}) {
+        std::string err;
+        auto d = create_decoder(c, &err);
+        const std::string what = d ? d->describe() : err;
+        std::printf("  %s: %s\n", codec_name(c), what.empty() ? "available" : what.c_str());
+    }
     return 0;
 }
 

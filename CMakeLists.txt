@@ -111,6 +111,26 @@ else()
     set(BROREMOTE_WITH_VAAPI OFF)
 endif()
 
+# ---- Media Foundation decoder (Windows) ------------------------------------------
+# Everything it needs is in the Windows SDK; which codecs actually decode is
+# probed at run time (src/mf/mf_probe.cpp).
+if(WIN32)
+    option(BROREMOTE_WITH_MF "Build the Media Foundation decoder" ON)
+else()
+    set(BROREMOTE_WITH_MF OFF)
+endif()
+if(BROREMOTE_WITH_MF)
+    message(STATUS "broremote: Media Foundation decoder enabled")
+    target_sources(broremote PRIVATE
+        src/mf/mf_util.cpp
+        src/mf/mf_bitstream.cpp
+        src/mf/mf_decoder.cpp
+        src/mf/mf_probe.cpp
+    )
+    target_compile_definitions(broremote PRIVATE BROREMOTE_HAVE_MF)
+    target_link_libraries(broremote PRIVATE mfplat mfuuid d3d11 ole32 oleaut32)
+endif()
+
 if(MSVC)
     target_compile_options(broremote PRIVATE /W4)
 else()

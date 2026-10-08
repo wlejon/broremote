@@ -52,6 +52,9 @@ public:
     // then requests a keyframe. `out.ready` is false when the decoder needs
     // more input before it has a picture.
     virtual bool decode(std::span<const uint8_t> bitstream, DecodedFrame& out, std::string* err) = 0;
+    // What is decoding, for a viewer to show: e.g. "Media Foundation, D3D11
+    // (hardware)". Empty when there is nothing worth saying.
+    [[nodiscard]] virtual std::string describe() const { return {}; }
 };
 
 std::unique_ptr<Encoder> create_encoder(Codec, const EncoderConfig&, std::string* err);

@@ -39,6 +39,13 @@ if(BROREMOTE_WITH_VAAPI)
     endif()
 endif()
 
+# The Media Foundation decoder: fixtures made with ffmpeg when it is on PATH,
+# and the VA-API encoder's recorded output in tests/fixtures.
+if(BROREMOTE_WITH_MF)
+    broremote_test(test_mf ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp TIMEOUT 600)
+    target_compile_definitions(test_mf PRIVATE BROREMOTE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+endif()
+
 if(TARGET broremote_cli)
     broremote_test(test_proxy ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp ARGS $<TARGET_FILE:broremote_cli>)
     add_dependencies(test_proxy broremote_cli)

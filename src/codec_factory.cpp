@@ -69,6 +69,11 @@ std::unique_ptr<Decoder> create_decoder(Codec c, std::string* err) {
     if (c == Codec::Raw) return detail::create_raw_decoder(err);
 #if defined(BROREMOTE_HAVE_MF)
     if (contains(detail::mf_decoders(), c)) return detail::create_mf_decoder(c, err);
+    if (err) {
+        const std::string why = detail::mf_unavailable_reason(c);
+        *err = unavailable(c, "decoding") + (why.empty() ? "" : ": " + why);
+        return nullptr;
+    }
 #endif
     if (err) *err = unavailable(c, "decoding");
     return nullptr;

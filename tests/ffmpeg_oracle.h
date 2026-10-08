@@ -1,8 +1,9 @@
 #pragma once
-// ffmpeg as a test oracle (POSIX): decode an elementary stream to RGB with
-// the BT.709 limited-range matrix the encoders signal, and compare pictures
-// by PSNR. ffmpeg is never linked; it runs as a child process when it is on
-// PATH.
+// ffmpeg as a test oracle: decode an elementary stream to RGB with the
+// BT.709 limited-range matrix the encoders signal, and compare pictures by
+// PSNR. ffmpeg is never linked; it runs as a child process when it is on
+// PATH. Commands go through popen (sh on POSIX, cmd.exe on Windows), so
+// paths are double-quoted and must not contain quotes.
 
 #include "broremote/codec.h"
 
@@ -16,9 +17,28 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#define popen _popen
+#define pclose _pclose
+#endif
+
 namespace oracle {
 
-inline bool have_ffmpeg() { return std::system("ffmpeg -hide_banner -version >/dev/null 2>&1") == 0; }
+#if defined(_WIN32)
+inline constexpr const char* kPipeRead = "rb";
+inline constexpr const char* kPipeWrite = "wb";
+inline constexpr const char* kNullDevice = "NUL";
+#else
+inline constexpr const char* kPipeRead = "r";
+inline constexpr const char* kPipeWrite = "w";
+inline constexpr const char* kNullDevice = "/dev/null";
+#endif
+
+inline std::string quote(const std::string& path) { return "\"" + path + "\""; }
+
+inline bool have_ffmpeg() {
+    return std::system((std::string("ffmpeg -hide_banner -version >") + kNullDevice + " 2>&1").c_str()) == 0;
+}
 
 inline void write_file(const std::string& path, const std::vector<uint8_t>& data) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -45,7 +65,7 @@ inline const char* demuxer(broremote::Codec c) {
 inline bool read_pictures(const std::string& cmd, size_t size, std::vector<std::vector<uint8_t>>& frames,
                           std::string& log, const std::string& err_path) {
     frames.clear();
-    std::FILE* p = popen((cmd + " 2>'" + err_path + "'").c_str(), "r");
+    std::FILE* p = popen((cmd + " 2>" + quote(err_path)).c_str(), kPipeRead);
     if (!p) {
         log = "popen failed";
         return false;
@@ -72,7 +92,7 @@ inline bool read_pictures(const std::string& cmd, size_t size, std::vector<std::
 // ffmpeg printed at error level: a clean decode prints nothing.
 inline bool decode(const std::string& path, broremote::Codec codec, uint32_t width, uint32_t height,
                    std::vector<std::vector<uint8_t>>& frames, std::string& log, bool luma_only = false) {
-    std::string cmd = std::string("ffmpeg -hide_banner -nostdin -v error -f ") + demuxer(codec) + " -i '" + path + "'";
+    std::string cmd = std::string("ffmpeg -hide_banner -nostdin -v error -f ") + demuxer(codec) + " -i " + quote(path);
     // The top-left width x height: a no-op for H.264/HEVC (their decoded
     // size is the visible one); for AV1 it applies render_size, which ffmpeg
     // does not.
@@ -100,8 +120,8 @@ inline std::vector<uint8_t> roundtrip_420(const std::string& scratch, const std:
     write_file(scratch, rgba);
     const std::string cmd =
         "ffmpeg -hide_banner -nostdin -v error -f rawvideo -pix_fmt rgba -s " + std::to_string(width) + "x" +
-        std::to_string(height) + " -i '" + scratch +
-        "' -sws_flags bicubic+accurate_rnd+full_chroma_int"
+        std::to_string(height) + " -i " + quote(scratch) +
+        " -sws_flags bicubic+accurate_rnd+full_chroma_int"
         " -vf scale=out_color_matrix=bt709:out_range=limited,format=yuv420p,"
         "scale=in_color_matrix=bt709:in_range=limited:out_range=full -f rawvideo -pix_fmt rgb24 -";
     std::vector<std::vector<uint8_t>> frames;
@@ -135,8 +155,8 @@ inline double psnr_luma(const uint8_t* y, const std::vector<double>& ideal) {
 // The stream's dimensions as ffprobe reports them.
 inline bool probe_size(const std::string& path, broremote::Codec codec, uint32_t& w, uint32_t& h) {
     const std::string cmd = std::string("ffprobe -v error -f ") + demuxer(codec) + " -select_streams v:0 " +
-                            "-show_entries stream=width,height -of csv=p=0 '" + path + "'";
-    std::FILE* p = popen(cmd.c_str(), "r");
+                            "-show_entries stream=width,height -of csv=p=0 " + quote(path);
+    std::FILE* p = popen(cmd.c_str(), kPipeRead);
     if (!p) return false;
     unsigned a = 0, b = 0;
     const int got = std::fscanf(p, "%u,%u", &a, &b);
