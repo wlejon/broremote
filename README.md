@@ -74,7 +74,14 @@ On the viewer (Windows):
 broremote-view --ssh HOST                             # runs `ssh -T HOST broremote proxy`
 broremote-view --ssh HOST --ssh-command "~/broremote/build/broremote proxy"   # not on PATH there
 broremote-view --ssh HOST --frames 600 --check-pattern --dump-png last.png    # scripted check
+broremote-view --ssh HOST --stats                     # where each second's frames spent their time
 ```
+Latency, end to end (host: `broremote serve-test --codec hevc --size 1920x1080 --latency --socket lat`):
+```bash
+broremote-view --ssh HOST --socket lat --latency-test 100   # key press -> picture, with the breakdown
+```
+On Windows the viewer runs the system's own OpenSSH by default: Git's MSYS
+ssh, often first on a shell's PATH, adds about 5 ms to every input event.
 Ctrl+Alt+Enter toggles fullscreen. Elsewhere:
 ```bash
 broremote serve-test --codec raw --size 1280x720     # Raw works everywhere, locally

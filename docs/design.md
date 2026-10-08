@@ -49,8 +49,10 @@ tools/          broremote (CLI: proxy, serve-test, codecs, encode, record),
                 connect (the --ssh/--socket target, shared), test_pattern,
                 picture (decoded pictures to RGBA, PSNR)
 tools/view/     broremote-view: keymap (SDL scancode -> evdev), input_map,
-                session (connect + decode threads), viewer_app (window,
-                render loop), png, main
+                session (connect + decode + ping threads), latency (where
+                each frame's time goes; latency probes), display_timing
+                (when a present reached the screen, from DXGI), viewer_app
+                (window, render loop), png, main
 tests/          ctest suite; tests/fixtures holds recorded VA-API streams
 ```
 
@@ -378,7 +380,12 @@ holding imports across frames would pin host buffers the host may free.
 - *Sequence.* I and P only, no B-frames: an IDR, then predicted frames each
   referencing only the one before it (two reconstructed surfaces
   alternate), until the next forced keyframe. CBR at the configured bitrate
-  with a half-second HRD buffer and no filler (`disable_bit_stuffing`):
+  with a 50 ms HRD buffer (three frames at 60 fps: a big change is one
+  packet that must cross the link before it shows, and with half a second
+  of buffer desktop-like content made packets of up to 450 kB, 4-5 ms over
+  ssh, against about 110 kB and 1.5 ms now, mean latency unchanged; the
+  first frame after a big change is softer and sharpens over the next few)
+  and no filler (`disable_bit_stuffing`):
   padding a quiet desktop up to the bitrate is wasted bandwidth, and on VCN 4
   (encoder firmware ENC 1.24) an AV1 frame needing more than about 35 KB of
   padding OBU hangs the encode ring. Mesa enables filler in CBR unless the
@@ -454,11 +461,18 @@ MFTs are not used; the system MFTs do DXVA themselves once given a device.
 
 ## Tools
 
-- `broremote proxy [--socket NAME]`: relays stdin/stdout to the local server
-  socket. This is what `ssh host broremote proxy` runs.
+- `broremote proxy [--socket NAME] [--pty]`: relays stdin/stdout to the
+  local server socket. This is what `ssh host broremote proxy` runs. With
+  `--pty` (for `ssh -tt`) it makes its terminal raw and writes a ready
+  marker before any protocol byte (`run_proxy` in stream.h).
 - `broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N]
-  [--bitrate KBPS] [--seconds N]`: a server fed a moving test pattern (CPU frames), so a viewer
-  can be tested with no bro. The pattern (tools/test_pattern.h) is a
+  [--bitrate KBPS] [--seconds N] [--window N] [--content scroll|desktop]
+  [--latency]`: a server fed a moving test pattern (CPU frames), so a viewer
+  can be tested with no bro. `--latency` answers each key or button press
+  at once (it looks for input every millisecond) with a frame whose second
+  block row counts the presses, for `broremote-view --latency-test`;
+  `--content desktop` is a still picture whose counter changes every frame
+  and which changes whole once a second; `--window` sets the ack window. The pattern (tools/test_pattern.h) is a
   scrolling gradient, a sweeping white bar, pure red/green/blue swatches and
   the frame counter as 32 one-bit blocks, so motion, channel order and
   dropped frames all show. With a codec this machine cannot encode it says
@@ -466,9 +480,10 @@ MFTs are not used; the system MFTs do DXVA themselves once given a device.
   moves the cursor it reports.
 - `broremote codecs`: what this build can encode and decode here.
 - `broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS]
-  [--fps N] [--keyframe-every N] [--out FILE]`: the test pattern straight
-  through an encoder, no server; writes the elementary stream and prints the
-  per-frame encode time.
+  [--fps N] [--keyframe-every N] [--out FILE] [--content scroll|desktop]`:
+  the test pattern straight through an encoder, no server; writes the
+  elementary stream and prints the per-frame encode time and the packet
+  sizes by kind (keyframes, scene changes, quiet frames).
 - `broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME]
   [--codec C] [--frames N] --out FILE`: connects as a viewer and writes the
   bitstream from the first keyframe to a file, acking each packet: what a
@@ -483,6 +498,25 @@ MFTs are not used; the system MFTs do DXVA themselves once given a device.
 `--ssh-command` the proxy gets `--socket NAME`). BatchMode because ssh runs
 with no console to prompt on: a password or host-key question fails at once
 with its reason instead of hanging. `--socket NAME` alone connects locally.
+
+Which ssh: `--ssh-program`, else `$BROREMOTE_SSH`, else on Windows the
+system's own OpenSSH (`%SystemRoot%\System32\OpenSSH\ssh.exe`) when it is
+there, else `ssh` from PATH. From a shell, PATH's ssh is often Git's MSYS
+build, whose emulated `select()` on the viewer's pipe holds each small
+write (input, acks, pings) for up to a timer tick: measured, a 5 ms mean
+and 15 ms worst round trip and 16 ms key press to picture, against 0.7 /
+1.5 ms and 11 ms with the system's ssh.
+
+`--ssh-pty` runs `ssh -tt -e none -o ObscureKeystrokeTiming=no` and `proxy
+--pty` instead: OpenSSH sets `TCP_NODELAY` (and the low-delay IPQoS) only
+on a session with a terminal, so this is the way to get Nagle off at both
+ends; the proxy makes the terminal raw and the viewer sends nothing until
+it has read the proxy's ready marker (`await_proxy_ready`), so the cooked
+terminal never sees a protocol byte. It is not the default because it
+measured no different: with video flowing both ways, and also with a quiet
+stream and the pointer moving constantly (`--latency-motion`, the case
+where Nagle would hold small writes), the key-press-to-picture time and
+the round trip were the same within noise either way.
 
 Threads: the render (main) thread owns the SDL window and does nothing that
 blocks on the network or the decoder. A connect thread opens the stream and
@@ -504,7 +538,12 @@ with the BT.709 limited-range colour space (`SDL_UpdateNVTexture`, no CPU
 conversion); Raw's RGBA into an RGBA32 texture. The picture is drawn
 letterboxed into the window (resizable; on the first stream the window
 fits it, up to 90% of the display), linear scaling, vsync on unless
-`--no-vsync`. Ctrl+Alt+Enter toggles fullscreen (not forwarded), and in
+`--no-vsync`. Vsync stays on: measured with the swap chain's own frame
+statistics, present-to-shown was the same with it off (8.7 ms mean
+windowed under DWM, 3.5 ms fullscreen, on a 360 Hz display; the window's
+DWM composition is the difference), and SDL's D3D11 vsync-off present
+(`DXGI_PRESENT_DO_NOT_WAIT`) can drop a present outright, which on a
+desktop that then stops changing would leave the last change unshown. Ctrl+Alt+Enter toggles fullscreen (not forwarded), and in
 fullscreen the keyboard is grabbed so system shortcuts go to the remote
 session. A zero-copy D3D11 path was not needed: the read-back and upload
 cost about 1-2 ms of a 16.7 ms frame.
@@ -532,6 +571,20 @@ named as such (with the decoders here); with `--any-codec` (no `SetCodec`)
 a stream it cannot decode says "this machine cannot decode the server's
 h264 stream". Server `Cursor` messages are logged.
 
+Timing (protocol 1.1): the session pings four times a second; the Pong
+gives the round trip and the offset between the clocks, and with each
+Video's server timing and FrameSent the tracker (`latency.cpp`) places
+every presented frame's age: server queue, encode, wait to send, net (the
+server's socket through ssh to fully received here, one way), decode wait,
+decode, present, and then present-to-shown from DXGI. The title shows the
+age and its main parts each second; `--stats` prints the whole line.
+`--latency-test N` against `serve-test --latency` closes the loop: it sends
+a press and release of `KEY_F13` (about four a second, one at a time),
+watches decoded pictures' input-marker row for the count that answers it,
+and reports input-to-decoded and input-to-presented with the mean parts
+(uplink plus the server noticing, queue, encode, wait, net, decode,
+present). `--latency-motion` keeps the pointer moving while it probes.
+
 Scripting: `--frames N` exits after N pictures were shown (`--timeout S`
 fails if they were not), `--dump-png FILE` writes the last picture shown,
 `--check-pattern` compares it with serve-test's pattern (counter, luma and
@@ -547,11 +600,33 @@ mean 3.4 ms (p99 8.2); HEVC 60.3 fps, decode 2.0 ms (p99 2.6),
 received-to-presented 2.5 ms; the pattern matches at 57-58 dB luma PSNR and
 the on-screen swatches are exact.
 
+### Latency, measured
+
+Windows (RTX 4090, 360 Hz display) to the halo's `serve-test --latency
+--size 1920x1080 --codec hevc --fps 60` over ssh on the LAN, 100 probes,
+key press to the answering picture presented (mean / p90 / max, ms):
+
+| Setup | scrolling pattern | desktop content |
+|---|---|---|
+| Before: Git's ssh, -T, 0.5 s HRD | 16.5 / 22.6 / 26.8 | |
+| Windows' own ssh | 10.5-11.5 / 13.0-13.8 / 19 | 9.3 / 11.7 / 17 |
+| ... and the 50 ms HRD | | 9.5 / 11.7-12.4 / 16 |
+
+Mean parts with the system's ssh: uplink and the server noticing 1.4-1.6
+(round trip 0.3-0.5, the rest serve-test's 1 ms input poll), queue 0.5
+(the encoder still busy with the previous frame), encode 4.5-5 (CPU
+frames, upload included), wait 0.01, net 0.4-0.8, decode 2-3.5 (MF,
+read back to the CPU included), present call 0.35; then 6-9 ms to the
+screen windowed (3.5 fullscreen). The ack window of 2 closed on 2-3 frames
+in 1500; a window of 1 closes on 49 and adds 1.1 ms, so acking on receipt
+instead of after decode, or a wider window, would change nothing at 60 fps.
+
 ## The bro side (not in this repo)
 
 bro links broremote under `BRO_WITH_REMOTE`. A small host adapter in bro
 submits each composited frame from the KMS presenter (the scanout buffer is a
-GBM dmabuf already, with its render-done fence) while `wants_frames()` is true,
+GBM dmabuf already, with its render-done fence) as soon as its GPU work is
+done, before the page flip, while `wants_frames()` is true,
 submits the current frame when `wants_frames()` turns true even if nothing
 was redrawn (a joining viewer needs a keyframe, and the server keeps no
 frame of its own), and feeds drained input to the engine's DRM input path, so remote input routes
@@ -586,8 +661,13 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   resize, input round-trip, cursor, two clients, codec negotiation, protocol
   errors, and every frame released exactly once on every path
   (tests/test_server.cpp).
-- `broremote proxy` as a child stream relaying a whole session, and
-  `serve-test` end to end (tests/test_proxy.cpp).
+- `broremote proxy` as a child stream relaying a whole session three ways
+  (plain pipes; `--pty` over pipes; on POSIX `--pty` on a real terminal in
+  its default cooked mode, which the Raw frames' arbitrary bytes must
+  cross untouched), and `serve-test` end to end (tests/test_proxy.cpp).
+- Protocol 1.1 timing: Ping / Pong, every Video's timing inside the Pongs
+  around it, FrameSent per frame in order, none to a 1.0 client, and the
+  window-wait count (tests/test_server.cpp, tests/test_wire.cpp).
 - VA-API (Linux with a VA encoder; skipped otherwise), per reported codec,
   ffmpeg decoding when it is on PATH (tests/test_vaapi.cpp): a 300-frame
   CPU sequence past the frame_num/POC wraps with forced keyframes, decoded
