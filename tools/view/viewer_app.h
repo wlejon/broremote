@@ -58,6 +58,7 @@ private:
     void update_title(bool force);
     void fit_window_to_stream(uint32_t w, uint32_t h);
     void toggle_fullscreen();
+    bool check_screen();
     ViewGeometry geometry() const;
 
     ViewerOptions opt_;

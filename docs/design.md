@@ -40,9 +40,16 @@ src/vaapi/      VA-API encoder (Linux): va_device (nodes, probe), va_source
                 (fence, dmabuf import, CPU upload), va_vpp (colour
                 conversion), va_encoder (the common half), va_h264,
                 va_hevc, va_av1 (parameters and packed headers)
-src/mf/         Media Foundation decoder (Windows)
-tools/          broremote (CLI: proxy, serve-test, codecs), broremote-view (viewer)
-tests/          ctest suite
+src/mf/         Media Foundation decoder (Windows): mf_util (startup, MFT
+                lookup, D3D11 device), mf_bitstream (keyframe detection),
+                mf_decoder (the decoder), mf_probe (factory entry points)
+tools/          broremote (CLI: proxy, serve-test, codecs, encode, record),
+                connect (the --ssh/--socket target, shared), test_pattern,
+                picture (decoded pictures to RGBA, PSNR)
+tools/view/     broremote-view: keymap (SDL scancode -> evdev), input_map,
+                session (connect + decode threads), viewer_app (window,
+                render loop), png, main
+tests/          ctest suite; tests/fixtures holds recorded VA-API streams
 ```
 
 CMake target `broremote` (alias `broremote::broremote`). Options:
@@ -59,7 +66,20 @@ actually do, so `available_encoders()` is honest on a box without the hardware.
 
 Dependencies resolve by the ecosystem convention (existing target, then
 `../<name>`, then `third_party/<name>`), though the core needs none. SDL3 for
-the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`.
+the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`; on
+Windows, when no vcpkg toolchain file points at it, the vcpkg trees at
+`$VCPKG_ROOT`, `../vcpkg` and `../../vcpkg` (triplet x64-windows) are tried,
+and `SDL3.dll` is copied next to the executables that load it. The viewer is
+built only when SDL3 is found, so a Linux box without it builds the rest.
+
+The C runtime: a top-level MSVC build links the CRT statically, while
+vcpkg's x64-windows SDL3 is a DLL with the dynamic CRT. That mix is sound
+and deliberate: SDL's API never passes CRT objects (heap blocks, FILE*)
+across the DLL boundary (what it allocates is freed with `SDL_free`), so
+each side keeps its own CRT, the import library adds no conflicting default
+libraries, and `broremote.exe` stays free of the VC++ runtime. Inside bro,
+broremote sets no CRT of its own and `SDL3::SDL3` is bro's static SDL built
+with bro's settings, so nothing mixes there.
 
 ## Wire format
 
@@ -295,6 +315,7 @@ class Decoder {
 public:
     virtual ~Decoder() = default;
     virtual bool decode(std::span<const uint8_t> bitstream, DecodedFrame& out, std::string* err) = 0;
+    virtual std::string describe() const { return {}; }  // e.g. "Media Foundation h264, hardware (D3D11)"
 };
 std::unique_ptr<Encoder> create_encoder(Codec, const EncoderConfig&, std::string* err);
 std::unique_ptr<Decoder> create_decoder(Codec, std::string* err);
@@ -311,6 +332,13 @@ VA-API), not for real use.
 
 `Decoder::decode` returns false when the bitstream is bad or the decoder lost
 sync; the viewer then acks the frame anyway and requests a keyframe.
+`describe()` says what is decoding, for a viewer's title and report (added
+with the MF decoder: whether a picture comes from the GPU or the CPU is the
+first thing to know about a slow viewer). The stream's size is the truth: a
+decoded picture can be larger than the `StreamConfig` (AV1 on VCN codes
+1080 lines as 1082), so a consumer crops it to the config's width and
+height, which for `DecodedFrame` is just a smaller `width`/`height` over the
+same rows and `uv_offset`.
 
 **VA-API encoder (Linux).** Waits on the acquire fence (a CPU `poll` on the
 sync_file, failing after one second), imports the dmabuf as a VA surface (DRM
@@ -370,16 +398,51 @@ holding imports across frames would pin host buffers the host may free.
   encoder prepends the delimiter to each packet; and the sequence header
   must carry `timing_info`.
 
-**Media Foundation decoder (Windows).** The H.264 (and HEVC/AV1 where the
-system has them) decoder MFT, hardware-accelerated through a D3D11 device
-manager where available, low-latency mode on, NV12 out.
+**Media Foundation decoder (Windows).** The system's synchronous decoder
+MFT for the codec (`MFTEnumEx`, NV12 output): msmpeg2vdec for H.264, the
+HEVC and AV1 Video Extensions where installed. Vendor asynchronous hardware
+MFTs are not used; the system MFTs do DXVA themselves once given a device.
+
+- *Hardware.* When the MFT is `MF_SA_D3D11_AWARE`, a D3D11 device (video
+  support, multithread protected) goes to it through an
+  `IMFDXGIDeviceManager`; if it refuses, the decoder runs in software. DXVA
+  pictures are slices of the decoder's texture array: each is copied to a
+  staging texture and read back. Software pictures come as `IMF2DBuffer`s.
+  Either way the visible area (the minimum display aperture) is copied out
+  into `DecodedFrame` NV12, so a 1080-line picture in a 1088-line surface
+  comes out 1080 lines. `$BROREMOTE_MF_HARDWARE=0` forces software.
+- *Latency.* `CODECAPI_AVLowLatencyMode` and `MF_LOW_LATENCY` are set. The
+  input type carries a placeholder size (the HEVC and AV1 MFTs offer no
+  output type without one); the real size arrives as
+  `MF_E_TRANSFORM_STREAM_CHANGE` on the first keyframe, and any later size
+  change the same way, renegotiating NV12. Some MFTs (the HEVC extension in
+  software) still hold each picture until they see the next access unit
+  start; when a packet gives no picture, the decoder feeds an access unit
+  delimiter (a temporal delimiter for AV1), which hands it over. A drain
+  would too, but those MFTs then accept no further input.
+- *Sync and errors.* The MFTs conceal rather than fail a predicted frame
+  with no reference, so the decoder checks it itself (`mf_bitstream`: an
+  H.264 IDR, an HEVC IRAP, an AV1 temporal unit with a sequence header and a
+  key frame) and returns false (lost sync) for anything before the first
+  keyframe and after any failure, which also flushes the MFT. Garbage the
+  MFT accepts is not detectable; it shows as corruption until the next
+  keyframe, which the reliable ssh transport makes moot in practice.
+- *Probe.* `mf_decoders()` reports a codec only when a real keyframe of it
+  (a flat grey 192x192 picture, embedded) decodes to the right picture,
+  through D3D11 and else in software, once per process (about 0.7 s for all
+  three; the viewer overlaps it with ssh starting). Why a codec is missing
+  is kept and appended to `create_decoder`'s error and shown by
+  `broremote codecs`.
+- *Measured* (RTX 4090, Windows 11): H.264, HEVC and AV1 all decode in
+  hardware. 1920x1080 to CPU NV12 per frame: H.264 1.9 ms hardware / 3.6 ms
+  software, HEVC 1.4 / 4.1 ms.
 
 ## Tools
 
 - `broremote proxy [--socket NAME]`: relays stdin/stdout to the local server
   socket. This is what `ssh host broremote proxy` runs.
 - `broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N]
-  [--seconds N]`: a server fed a moving test pattern (CPU frames), so a viewer
+  [--bitrate KBPS] [--seconds N]`: a server fed a moving test pattern (CPU frames), so a viewer
   can be tested with no bro. The pattern (tools/test_pattern.h) is a
   scrolling gradient, a sweeping white bar, pure red/green/blue swatches and
   the frame counter as 32 one-bit blocks, so motion, channel order and
@@ -391,10 +454,83 @@ manager where available, low-latency mode on, NV12 out.
   [--fps N] [--keyframe-every N] [--out FILE]`: the test pattern straight
   through an encoder, no server; writes the elementary stream and prints the
   per-frame encode time.
-- `broremote-view [--ssh HOST | --socket NAME] [--ssh-command CMD]`: SDL3
-  window; decodes and shows the stream scaled to the window with the aspect
-  kept; sends keys, pointer and wheel; requests a keyframe on decode error;
-  releases held keys on focus loss.
+- `broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME]
+  [--codec C] [--frames N] --out FILE`: connects as a viewer and writes the
+  bitstream from the first keyframe to a file, acking each packet: what a
+  server really sends (the test fixtures were made this way).
+- `broremote-view [--ssh HOST [--ssh-command CMD] | --socket NAME]
+  [options]`: the viewer, below.
+
+### broremote-view
+
+`--ssh HOST` runs `ssh -T -o BatchMode=yes HOST <cmd>` (`cmd` defaults to
+`broremote proxy`; `--ssh-command` replaces it; with `--socket NAME` and no
+`--ssh-command` the proxy gets `--socket NAME`). BatchMode because ssh runs
+with no console to prompt on: a password or host-key question fails at once
+with its reason instead of hanging. `--socket NAME` alone connects locally.
+
+Threads: the render (main) thread owns the SDL window and does nothing that
+blocks on the network or the decoder. A connect thread opens the stream and
+the `Client` (and meanwhile probes the decoders), so the window shows
+"connecting" at once. The Client's reader queues configs and packets for a
+decode thread (`tools/view/session.cpp`), which makes a decoder per codec
+(kept across size changes, which it handles in band), decodes each packet,
+acks it at once, decoded or not, and on a failure requests a keyframe (once
+per run of failures, until a keyframe arrives), crops the picture to the
+`StreamConfig` size and publishes it in a one-slot mailbox. The render
+thread takes the newest picture when woken (an SDL user event, at most one
+queued), so it never shows a queue of old frames; buffers are swapped, not
+copied or reallocated. Acking after decode rather than after display keeps
+the server's two-frame window moving even when presentation waits for
+vsync.
+
+Display: NV12 goes straight into an SDL NV12 streaming texture created
+with the BT.709 limited-range colour space (`SDL_UpdateNVTexture`, no CPU
+conversion); Raw's RGBA into an RGBA32 texture. The picture is drawn
+letterboxed into the window (resizable; on the first stream the window
+fits it, up to 90% of the display), linear scaling, vsync on unless
+`--no-vsync`. Ctrl+Alt+Enter toggles fullscreen (not forwarded), and in
+fullscreen the keyboard is grabbed so system shortcuts go to the remote
+session. A zero-copy D3D11 path was not needed: the read-back and upload
+cost about 1-2 ms of a 16.7 ms frame.
+
+Input (`input_map.cpp`, `keymap.cpp`): keys from SDL scancodes (USB HID
+usages, the same on every platform) to evdev `KEY_*` through a full
+table (letters, digits, F1-F24, modifiers, navigation, keypad,
+punctuation, ISO/JIS/Korean keys, media keys; checked against
+linux/input-event-codes.h); auto-repeat is not forwarded (the host repeats).
+Buttons to `BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA`; a click first moves the
+pointer to where it happened. Pointer positions map from window
+coordinates through the letterbox to stream pixels, clamped to the picture
+(motion over the bars pins to the edge). The wheel goes in 120ths, SDL's +y
+up negated to the protocol's +y down, with fractions of a 120th carried to
+the next event. Only what was pressed in the window is released, and focus
+loss releases every held key and button.
+
+Status: the window title shows the target and state (connecting, codec,
+size, displayed fps, decode time, decoder), and before the first picture
+the window says it in text. A connection that fails or ends exits with the
+reason (ssh's stderr included, e.g. "broremote: command not found");
+exit code 1 for a failure, 0 for a user close or the server's clean
+shutdown. A server that cannot send any codec this machine decodes is
+named as such (with the decoders here); with `--any-codec` (no `SetCodec`)
+a stream it cannot decode says "this machine cannot decode the server's
+h264 stream". Server `Cursor` messages are logged.
+
+Scripting: `--frames N` exits after N pictures were shown (`--timeout S`
+fails if they were not), `--dump-png FILE` writes the last picture shown,
+`--check-pattern` compares it with serve-test's pattern (counter, luma and
+RGB PSNR) and reads the window back to check the colour swatches on
+screen. Every run ends with a report: pictures decoded/failed/shown,
+keyframe requests, fps, Mbit/s, decode time and packet-received-to-presented
+latency (mean, p50, p99).
+
+Measured from Windows (RTX 4090) to the halo's `serve-test --size
+1920x1080 --fps 60` over ssh on the LAN: H.264 900 of 900 pictures shown at
+60.1 fps, 19.7 Mbit/s, decode mean 3.0 ms (p99 7.4), received-to-presented
+mean 3.4 ms (p99 8.2); HEVC 60.3 fps, decode 2.0 ms (p99 2.6),
+received-to-presented 2.5 ms; the pattern matches at 57-58 dB luma PSNR and
+the on-screen swatches are exact.
 
 ## The bro side (not in this repo)
 
@@ -439,7 +575,24 @@ gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
   code value of mean error per channel, which catches a wrong matrix, range,
   transfer or channel order. Also measures dmabuf-to-packet latency at
   1920x1080 and 2560x1440.
-- Media Foundation (Windows): decode a fixture bitstream produced by ffmpeg
-  and compare against the expected pattern.
-- End to end: `serve-test` on the halo, `broremote-view --ssh halo` on
-  Windows.
+- Media Foundation (Windows, tests/test_mf.cpp): with ffmpeg on PATH, the
+  test pattern encoded by libx264 / libx265 / libaom (I and P only) at
+  640x360 then 718x404 in one stream, decoded per codec the machine reports:
+  every picture's size, frame counter, luma PSNR >= 35 dB, RGB PSNR and
+  colour swatches, in hardware and in software; starting at a later
+  keyframe (the predicted frames before it are lost sync, then every frame
+  decodes); garbage and truncated packets mid-stream (no crash; the next
+  keyframe decodes cleanly); and the 1920x1080 decode time. Without ffmpeg
+  those are skipped. Always: the VA-API encoder's own H.264 and HEVC
+  (tests/fixtures/halo_vaapi.*, recorded with `broremote record` from the
+  halo's serve-test at 640x360, 3 Mbit/s) decode with every picture matching
+  the pattern frame its counter names (52-53 dB luma).
+- The viewer (tests/test_view.cpp, wherever SDL3 is found): an in-process
+  Server streams Raw to the real `Viewer` on SDL's offscreen driver in a
+  1000x1000 window (the 640x360 picture letterboxed); injected SDL events
+  must arrive at the server as exactly the expected InputEvents: pointer
+  mapping and clamping, buttons, wheel units and fractions, key codes, no
+  auto-repeat, the fullscreen hotkey kept local, release on focus loss; then
+  a stream size change and the mapping following it.
+- End to end: `serve-test` on the halo, `broremote-view --ssh halo
+  --frames N --check-pattern` on Windows (by hand; numbers above).

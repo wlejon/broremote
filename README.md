@@ -19,13 +19,15 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 | Wire primitives, protocol, streams (local socket, ssh child, stdio) | done, tested on Windows and Linux |
 | Server (I/O + encode threads, ack window, keyframes, input, cursor) and Client | done, tested on Windows and Linux |
 | `Codec::Raw` (CPU RGBA, run-length + XOR-delta) and the codec factory | done |
-| `broremote proxy`, `broremote serve-test`, `broremote codecs` | done |
-| VA-API encoder (Linux: H.264, then HEVC/AV1) | not yet |
-| Media Foundation decoder + `broremote-view` (SDL3) | not yet |
+| `broremote proxy`, `serve-test`, `codecs`, `encode`, `record` | done |
+| VA-API encoder (Linux): H.264, HEVC; AV1 opt-in | done, tested on radeonsi |
+| Media Foundation decoder (Windows): H.264, HEVC, AV1, D3D11 or software | done |
+| `broremote-view` (SDL3): Windows decodes; Linux shows Raw only, so far | done |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | not yet |
 
-Until the hardware codecs land, only `--codec raw` works: fine on a local
-socket, far too much bandwidth for a real link.
+Measured: the halo's 1920x1080 test pattern at 60 fps over ssh to a Windows
+viewer runs at 60 fps with 2-3 ms decode and 2.5-3.5 ms from packet to
+screen (docs/design.md has the details).
 
 ## Building
 
@@ -47,14 +49,36 @@ ctest --test-dir build
 ```
 
 Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
-`BROREMOTE_BUILD_TOOLS` (on).
+`BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_BUILD_VIEWER` (on when SDL3 is
+found), `BROREMOTE_WITH_VAAPI` (on on Linux when libva is found),
+`BROREMOTE_WITH_MF` (on on Windows).
+
+SDL3 for the viewer comes from an existing `SDL3::SDL3` target or
+`find_package(SDL3)`; on Windows a vcpkg tree at `$VCPKG_ROOT`, `../vcpkg` or
+`../../vcpkg` (x64-windows) is found without a toolchain file, and
+`SDL3.dll` is copied next to the viewer. The static CRT of a top-level MSVC
+build and SDL3.dll's dynamic one coexist safely (see docs/design.md).
+
+Tests use ffmpeg as an oracle when it is on PATH (never linked).
 
 ## Trying it
 
+On the host (Linux with VA-API):
 ```bash
-broremote serve-test --codec raw --size 1280x720     # a server fed a moving test pattern
-broremote proxy                                       # what `ssh host broremote proxy` runs
-broremote codecs                                      # what this build can encode and decode
+broremote serve-test --codec h264 --size 1920x1080   # a server fed a moving test pattern
+```
+On the viewer (Windows):
+```bash
+broremote-view --ssh HOST                             # runs `ssh -T HOST broremote proxy`
+broremote-view --ssh HOST --ssh-command "~/broremote/build/broremote proxy"   # not on PATH there
+broremote-view --ssh HOST --frames 600 --check-pattern --dump-png last.png    # scripted check
+```
+Ctrl+Alt+Enter toggles fullscreen. Elsewhere:
+```bash
+broremote serve-test --codec raw --size 1280x720     # Raw works everywhere, locally
+broremote-view --socket default                       # a local server
+broremote codecs                                      # what this build can encode and decode, and how
+broremote record --ssh HOST --frames 60 --out s.h264  # capture what a server sends
 ```
 
 The server's socket is `$XDG_RUNTIME_DIR/broremote/<name>.sock` (mode 0600 in

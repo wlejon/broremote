@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace broremote::view {
 
@@ -340,9 +341,52 @@ int Viewer::finish() {
             std::fprintf(stderr, "broremote-view: pattern frame %lld: luma PSNR %.1f dB, RGB PSNR %.1f dB: %s\n",
                          static_cast<long long>(n), luma, rgb, good ? "match" : "MISMATCH");
             if (!good) rc = 1;
+            if (!check_screen()) rc = 1;
         }
     }
     return rc;
+}
+
+// Draws the last picture again and reads the window back: the red, green and
+// blue swatches must come out pure on screen, which they do only with the
+// texture's colour space right (BT.709 limited range for NV12).
+bool Viewer::check_screen() {
+    if (!texture_) return false;
+    SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
+    SDL_RenderClear(renderer_);
+    int ow = 0, oh = 0;
+    SDL_GetCurrentRenderOutputSize(renderer_, &ow, &oh);
+    const Rect r = letterbox(float(ow), float(oh), tex_w_, tex_h_);
+    const SDL_FRect dst{r.x, r.y, r.w, r.h};
+    SDL_RenderTexture(renderer_, texture_, nullptr, &dst);
+    SDL_Surface* raw = SDL_RenderReadPixels(renderer_, nullptr);
+    SDL_Surface* s = raw ? SDL_ConvertSurface(raw, SDL_PIXELFORMAT_RGBA32) : nullptr;
+    if (raw) SDL_DestroySurface(raw);
+    if (!s) {
+        std::fprintf(stderr, "broremote-view: cannot read the window back: %s\n", SDL_GetError());
+        return false;
+    }
+    bool ok = true;
+    std::string report;
+    const struct {
+        float x;
+        uint8_t r, g, b;
+        const char* name;
+    } swatches[] = {{8, 255, 0, 0, "red"}, {24, 0, 255, 0, "green"}, {40, 0, 0, 255, "blue"}};
+    for (const auto& sw : swatches) {
+        const int px = int(r.x + sw.x * r.w / float(tex_w_));
+        const int py = int(r.y + 8.0f * r.h / float(tex_h_));
+        const uint8_t* p = static_cast<const uint8_t*>(s->pixels) + size_t(py) * size_t(s->pitch) + size_t(px) * 4;
+        const bool near = std::abs(p[0] - sw.r) <= 12 && std::abs(p[1] - sw.g) <= 12 && std::abs(p[2] - sw.b) <= 12;
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "%s%s %u,%u,%u", report.empty() ? "" : ", ", sw.name, p[0], p[1], p[2]);
+        report += buf;
+        ok = ok && near;
+    }
+    SDL_DestroySurface(s);
+    std::fprintf(stderr, "broremote-view: on screen (%dx%d): %s: %s\n", ow, oh, report.c_str(),
+                 ok ? "match" : "MISMATCH");
+    return ok;
 }
 
 int run_viewer(const ViewerOptions& options) {
