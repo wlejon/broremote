@@ -46,6 +46,17 @@ void draw_test_pattern(uint8_t* rgba, uint32_t width, uint32_t height, uint64_t 
     }
 }
 
+void draw_desktop_pattern(uint8_t* rgba, uint32_t width, uint32_t height, uint64_t n, uint32_t scene_frames) {
+    const uint64_t scene = scene_frames ? n / scene_frames : 0;
+    // A scene's picture: the scrolling pattern at an offset far from the last one.
+    draw_test_pattern(rgba, width, height, scene * 97 + 13);
+    const uint32_t b = kPatternBlock;
+    for (uint32_t i = 0; i < 32; ++i) {
+        const uint8_t v = ((n >> (31 - i)) & 1) ? 255 : 0;
+        fill_block(rgba, width, height, (3 + i) * b, 0, b, v, v, v);
+    }
+}
+
 void draw_input_marker(uint8_t* rgba, uint32_t width, uint32_t height, uint32_t presses) {
     const uint32_t b = kPatternBlock;
     for (uint32_t i = 0; i < 32; ++i) {

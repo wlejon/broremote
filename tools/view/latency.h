@@ -43,6 +43,7 @@ struct LatencyWindow {
     double age = 0;        // submit -> presented
     double kbytes = 0;     // mean packet size
     double max_age = 0;
+    double max_kbytes = 0, max_net = 0;  // the biggest packet, and the slowest one over the wire
 };
 
 // One closed latency probe, milliseconds.

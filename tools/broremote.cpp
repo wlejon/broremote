@@ -50,7 +50,9 @@ int usage() {
                  "           --window: unacked frames per client before encoding pauses (default 2)\n"
                  "       broremote codecs\n"
                  "       broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS] [--fps N]\n"
-                 "                        [--keyframe-every N] [--out FILE]\n"
+                 "                        [--keyframe-every N] [--out FILE] [--content scroll|desktop]\n"
+                 "           --content desktop (also for serve-test): a still picture, the counter changing\n"
+                 "           every frame and the whole picture once a second (frame-size spikes)\n"
                  "       broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C]\n"
                  "                        [--frames N] --out FILE\n"
                  "       broremote --version\n");
@@ -104,11 +106,16 @@ int cmd_serve_test(int argc, char** argv) {
     cfg.codecs = {Codec::Raw};
     uint32_t width = 1280, height = 720, seconds = 0;
     bool latency = false;
+    bool desktop = false;
     for (int i = 0; i < argc; ++i) {
         const char* a = argv[i];
         const bool has = i + 1 < argc;
         if (!std::strcmp(a, "--latency")) {
             latency = true;
+        } else if (!std::strcmp(a, "--content") && has) {
+            const std::string c = argv[++i];
+            if (c == "desktop") desktop = true;
+            else if (c != "scroll") return usage();
         } else if (!std::strcmp(a, "--window") && has) {
             if (!parse_uint(argv[++i], cfg.max_frames_in_flight) || cfg.max_frames_in_flight == 0) return usage();
         } else if (!std::strcmp(a, "--socket") && has) {
@@ -168,7 +175,8 @@ int cmd_serve_test(int argc, char** argv) {
         }
         if (!free_buf) return;
         free_buf->busy = true;
-        tools::draw_test_pattern(free_buf->pixels.data(), width, height, n);
+        if (desktop) tools::draw_desktop_pattern(free_buf->pixels.data(), width, height, n, cfg.fps);
+        else tools::draw_test_pattern(free_buf->pixels.data(), width, height, n);
         if (latency) tools::draw_input_marker(free_buf->pixels.data(), width, height, presses);
         Frame f;
         f.width = width;
@@ -237,10 +245,15 @@ int cmd_encode(int argc, char** argv) {
     ec.height = 1080;
     uint32_t frames = 120, keyframe_every = 0;
     std::string out_path;
+    bool desktop = false;
     for (int i = 0; i < argc; ++i) {
         const char* a = argv[i];
         const bool has = i + 1 < argc;
-        if (!std::strcmp(a, "--codec") && has) {
+        if (!std::strcmp(a, "--content") && has) {
+            const std::string c = argv[++i];
+            if (c == "desktop") desktop = true;
+            else if (c != "scroll") return usage();
+        } else if (!std::strcmp(a, "--codec") && has) {
             auto c = parse_codec(argv[++i]);
             if (!c) return usage();
             codec = *c;
@@ -275,8 +288,11 @@ int cmd_encode(int argc, char** argv) {
     std::vector<double> ms;
     uint64_t bytes = 0;
     int rc = 0;
+    // Packet sizes by kind: keyframes, scene changes (desktop), the rest.
+    std::vector<double> key_kb, scene_kb, quiet_kb;
     for (uint32_t n = 0; n < frames; ++n) {
-        tools::draw_test_pattern(pixels.data(), ec.width, ec.height, n);
+        if (desktop) tools::draw_desktop_pattern(pixels.data(), ec.width, ec.height, n, ec.fps);
+        else tools::draw_test_pattern(pixels.data(), ec.width, ec.height, n);
         Frame f;
         f.width = ec.width;
         f.height = ec.height;
@@ -292,8 +308,20 @@ int cmd_encode(int argc, char** argv) {
         }
         ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         bytes += pkt.data.size();
+        const double kb = double(pkt.data.size()) / 1000.0;
+        if (pkt.keyframe) key_kb.push_back(kb);
+        else if (desktop && n % ec.fps == 0) scene_kb.push_back(kb);
+        else quiet_kb.push_back(kb);
         if (out) std::fwrite(pkt.data.data(), 1, pkt.data.size(), out);
     }
+    const auto sizes = [](const char* what, std::vector<double> v) {
+        if (v.empty()) return;
+        std::sort(v.begin(), v.end());
+        double s = 0;
+        for (double x : v) s += x;
+        std::printf("  %s: %zu packets, mean %.1f kB, p50 %.1f, max %.1f kB\n", what, v.size(), s / double(v.size()),
+                    v[v.size() / 2], v.back());
+    };
     if (out) std::fclose(out);
     if (!ms.empty()) {
         // The first frame opens the device; report it apart from the rest.
@@ -306,6 +334,9 @@ int cmd_encode(int argc, char** argv) {
                     codec_name(codec), ec.width, ec.height, ms.size(), double(bytes) * 8 / 1000 / double(ms.size()),
                     ms[0], rest.empty() ? 0.0 : sum / double(rest.size()), pct(0.5), pct(0.99),
                     rest.empty() ? 0.0 : rest.back());
+        sizes("keyframes", key_kb);
+        sizes(desktop ? "scene changes" : "predicted", desktop ? scene_kb : quiet_kb);
+        if (desktop) sizes("quiet frames", quiet_kb);
     }
     return rc;
 }

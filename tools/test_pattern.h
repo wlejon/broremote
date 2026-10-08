@@ -24,6 +24,12 @@ int64_t read_test_pattern_counter(const uint8_t* rgba, uint32_t width, uint32_t 
 // the number of key / button presses the server has received, so a viewer
 // can see when the picture answers its input (row 1, the same layout).
 inline constexpr uint32_t kInputMarkerRow = 1;
+
+// Desktop-like content for measuring frame sizes: a still picture that
+// changes completely every `scene_frames` frames (a window switch, a page
+// scrolled), with only the counter row changing between (typing, a clock).
+// Frame n of it: the same counter and swatches as draw_test_pattern.
+void draw_desktop_pattern(uint8_t* rgba, uint32_t width, uint32_t height, uint64_t n, uint32_t scene_frames);
 void draw_input_marker(uint8_t* rgba, uint32_t width, uint32_t height, uint32_t presses);
 
 }  // namespace broremote::tools

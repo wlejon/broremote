@@ -113,6 +113,8 @@ void LatencyTracker::on_presented(uint64_t frame_id, Clock::time_point when) {
         sum_.encode += double(t->timing.encode_us) / 1000.0;
         sum_.wait += double(t->have_sent ? t->wait_us : 0) / 1000.0;
         sum_.net += ms(t->received - send_start);
+        sum_.max_net = std::max(sum_.max_net, ms(t->received - send_start));
+        sum_.max_kbytes = std::max(sum_.max_kbytes, double(t->bytes) / 1000.0);
         sum_.dwait += ms(t->dstart - t->received);
         sum_.decode += ms(t->decoded - t->dstart);
         sum_.present += ms(when - t->decoded);
