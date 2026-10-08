@@ -53,4 +53,23 @@ inline double psnr_rgba(const uint8_t* a, const uint8_t* b, uint32_t width, uint
     return mse <= 1e-10 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
 }
 
+// PSNR in dB of an NV12 picture's luma against the ideal BT.709
+// limited-range luma of an RGBA source of the same size.
+inline double psnr_luma(const DecodedFrame& f, const uint8_t* rgba) {
+    if (f.format != PixelFormat::NV12) return 0;
+    double se = 0;
+    for (uint32_t y = 0; y < f.height; ++y) {
+        const uint8_t* row = f.data.data() + size_t(y) * f.stride;
+        const uint8_t* src = rgba + size_t(y) * f.width * 4;
+        for (uint32_t x = 0; x < f.width; ++x) {
+            const double ideal =
+                16.0 + 219.0 * (0.2126 * src[x * 4] + 0.7152 * src[x * 4 + 1] + 0.0722 * src[x * 4 + 2]) / 255.0;
+            const double d = double(row[x]) - ideal;
+            se += d * d;
+        }
+    }
+    const double mse = se / (double(f.width) * f.height);
+    return mse <= 1e-10 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+}
+
 }  // namespace broremote::tools

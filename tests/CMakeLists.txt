@@ -46,6 +46,13 @@ if(BROREMOTE_WITH_MF)
     target_compile_definitions(test_mf PRIVATE BROREMOTE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 endif()
 
+# broremote-view's input path through the real Viewer (SDL's offscreen driver).
+if(TARGET broremote_view_core)
+    broremote_test(test_view TIMEOUT 120)
+    target_link_libraries(test_view PRIVATE broremote_view_core)
+    broremote_copy_runtime_dlls(test_view)
+endif()
+
 if(TARGET broremote_cli)
     broremote_test(test_proxy ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp ARGS $<TARGET_FILE:broremote_cli>)
     add_dependencies(test_proxy broremote_cli)

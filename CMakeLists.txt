@@ -149,6 +149,80 @@ if(BROREMOTE_BUILD_TOOLS)
     endif()
 endif()
 
+# ---- broremote-view (SDL3) --------------------------------------------------------
+# SDL3: an existing SDL3::SDL3 target (bro builds its own, static), else an
+# installed package. On Windows a vcpkg tree is looked for where it usually
+# lives when no toolchain file points at it ($VCPKG_ROOT, ../vcpkg,
+# ../../vcpkg; the x64-windows triplet), and SDL3.dll is copied next to the
+# executables that need it.
+#
+# The CRT: a top-level MSVC build links the CRT statically (above), while
+# vcpkg's x64-windows SDL3 is a DLL with its own (dynamic) CRT. That is
+# sound: SDL's API never hands CRT objects across the DLL boundary (memory
+# it allocates is freed with SDL_free), so each side keeps its own CRT and
+# nothing here needs /MD. Inside bro, SDL3::SDL3 is bro's static SDL built
+# with bro's CRT settings, which broremote then inherits, so nothing mixes.
+if(NOT TARGET SDL3::SDL3)
+    find_package(SDL3 CONFIG QUIET)
+    if(NOT SDL3_FOUND AND WIN32)
+        set(_broremote_sdl_hints)
+        foreach(_root "$ENV{VCPKG_ROOT}" "$ENV{VCPKG_INSTALLATION_ROOT}" "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg"
+                      "${CMAKE_CURRENT_SOURCE_DIR}/../../vcpkg")
+            if(_root AND EXISTS "${_root}/installed/x64-windows/share/sdl3")
+                list(APPEND _broremote_sdl_hints "${_root}/installed/x64-windows")
+            endif()
+        endforeach()
+        if(_broremote_sdl_hints)
+            find_package(SDL3 CONFIG QUIET PATHS ${_broremote_sdl_hints} NO_DEFAULT_PATH)
+        endif()
+    endif()
+endif()
+if(TARGET SDL3::SDL3)
+    set(_broremote_viewer_default ON)
+else()
+    set(_broremote_viewer_default OFF)
+endif()
+option(BROREMOTE_BUILD_VIEWER "Build broremote-view (needs SDL3)" ${_broremote_viewer_default})
+if(BROREMOTE_BUILD_VIEWER AND NOT TARGET SDL3::SDL3)
+    message(FATAL_ERROR "BROREMOTE_BUILD_VIEWER is ON but SDL3 was not found")
+endif()
+
+# Copy the DLLs `target` loads (SDL3.dll from a shared SDL) next to it.
+function(broremote_copy_runtime_dlls target)
+    if(WIN32 AND TARGET SDL3::SDL3-shared AND NOT TARGET SDL3::SDL3-static)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS)
+    endif()
+endfunction()
+
+if(BROREMOTE_BUILD_VIEWER)
+    message(STATUS "broremote: broremote-view enabled (SDL3)")
+    # Everything but main(), so the tests drive the same code.
+    add_library(broremote_view_core STATIC
+        tools/view/keymap.cpp
+        tools/view/input_map.cpp
+        tools/view/session.cpp
+        tools/view/viewer_app.cpp
+        tools/view/png.cpp
+        tools/connect.cpp
+        tools/test_pattern.cpp
+    )
+    set_target_properties(broremote_view_core PROPERTIES COMPILE_PDB_NAME broremote_view_core)
+    target_include_directories(broremote_view_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/view
+                                                          ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_link_libraries(broremote_view_core PUBLIC broremote SDL3::SDL3)
+    if(WIN32)
+        target_compile_definitions(broremote_view_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    add_executable(broremote_view tools/view/main.cpp)
+    set_target_properties(broremote_view PROPERTIES OUTPUT_NAME broremote-view)
+    target_link_libraries(broremote_view PRIVATE broremote_view_core)
+    broremote_copy_runtime_dlls(broremote_view)
+else()
+    message(STATUS "broremote: broremote-view disabled (SDL3 not found)")
+endif()
+
 if(BROREMOTE_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR BRO_BUILD_TESTS))
     include(CTest)
     add_subdirectory(tests)
