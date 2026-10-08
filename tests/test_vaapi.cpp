@@ -469,8 +469,10 @@ void remove_dir(const std::string& dir) {
 int main() {
     check::watchdog(900);
     std::vector<Codec> codecs;
+    // $BROREMOTE_TEST_CODEC narrows the run to one codec.
+    const char* only = std::getenv("BROREMOTE_TEST_CODEC");
     for (Codec c : available_encoders()) {
-        if (c != Codec::Raw) codecs.push_back(c);
+        if (c != Codec::Raw && (!only || !*only || parse_codec(only) == c)) codecs.push_back(c);
     }
     if (codecs.empty()) {
         std::printf("SKIP: no VA-API encoder on this machine (broremote encode lists only raw)\n");

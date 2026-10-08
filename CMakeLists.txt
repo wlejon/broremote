@@ -99,6 +99,7 @@ if(UNIX AND NOT APPLE)
             src/vaapi/va_vpp.cpp
             src/vaapi/va_encoder.cpp
             src/vaapi/va_h264.cpp
+            src/vaapi/va_hevc.cpp
         )
         target_compile_definitions(broremote PRIVATE BROREMOTE_HAVE_VAAPI)
         target_link_libraries(broremote PRIVATE PkgConfig::BROREMOTE_VA)

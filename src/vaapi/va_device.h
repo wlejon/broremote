@@ -21,6 +21,12 @@ struct CodecCaps {
     uint32_t max_width = 0;                // 0: not reported
     uint32_t max_height = 0;
     uint32_t quality_levels = 0;           // VAConfigAttribEncQualityRange
+    // Codec-specific attributes, VA_ATTRIB_NOT_SUPPORTED where they do not apply.
+    uint32_t hevc_features = VA_ATTRIB_NOT_SUPPORTED;     // VAConfigAttribEncHEVCFeatures
+    uint32_t hevc_block_sizes = VA_ATTRIB_NOT_SUPPORTED;  // VAConfigAttribEncHEVCBlockSizes
+    uint32_t av1_features = VA_ATTRIB_NOT_SUPPORTED;      // VAConfigAttribEncAV1
+    uint32_t av1_ext1 = VA_ATTRIB_NOT_SUPPORTED;          // VAConfigAttribEncAV1Ext1
+    uint32_t av1_ext2 = VA_ATTRIB_NOT_SUPPORTED;          // VAConfigAttribEncAV1Ext2
 };
 
 struct NodeCaps {

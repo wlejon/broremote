@@ -16,7 +16,7 @@
 namespace broremote::vaapi {
 
 const std::vector<Codec>& supported_codecs() {
-    static const std::vector<Codec> codecs{Codec::H264};
+    static const std::vector<Codec> codecs{Codec::H264, Codec::HEVC};
     return codecs;
 }
 
@@ -140,6 +140,7 @@ private:
         }
         switch (codec_) {
             case Codec::H264: impl_ = make_h264(sp_); break;
+            case Codec::HEVC: impl_ = make_hevc(sp_); break;
             default: return fail(err, std::string(codec_name(codec_)) + " is not implemented by the VA-API backend");
         }
 

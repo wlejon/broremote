@@ -100,9 +100,15 @@ bool probe_codec(VADisplay dpy, const std::vector<VAProfile>& profiles, Codec co
                                    {VAConfigAttribEncPackedHeaders, 0},
                                    {VAConfigAttribMaxPictureWidth, 0},
                                    {VAConfigAttribMaxPictureHeight, 0}};
-            VAConfigAttrib q{VAConfigAttribEncQualityRange, 0};
             if (vaGetConfigAttributes(dpy, p, ep, a, 5) != VA_STATUS_SUCCESS) continue;
-            vaGetConfigAttributes(dpy, p, ep, &q, 1);
+            // Asked one at a time: a driver may fail the whole call for an
+            // attribute that does not apply to the profile.
+            const auto attr = [&](VAConfigAttribType t) {
+                VAConfigAttrib x{t, 0};
+                return vaGetConfigAttributes(dpy, p, ep, &x, 1) == VA_STATUS_SUCCESS ? x.value
+                                                                                     : uint32_t(VA_ATTRIB_NOT_SUPPORTED);
+            };
+            const uint32_t quality = attr(VAConfigAttribEncQualityRange);
             if (a[0].value == VA_ATTRIB_NOT_SUPPORTED || !(a[0].value & VA_RT_FORMAT_YUV420)) continue;
             if (a[1].value == VA_ATTRIB_NOT_SUPPORTED || !(a[1].value & VA_RC_CBR)) continue;
             out.codec = codec;
@@ -111,7 +117,12 @@ bool probe_codec(VADisplay dpy, const std::vector<VAProfile>& profiles, Codec co
             out.packed_headers = a[2].value == VA_ATTRIB_NOT_SUPPORTED ? 0 : a[2].value;
             out.max_width = a[3].value == VA_ATTRIB_NOT_SUPPORTED ? 0 : a[3].value;
             out.max_height = a[4].value == VA_ATTRIB_NOT_SUPPORTED ? 0 : a[4].value;
-            out.quality_levels = q.value == VA_ATTRIB_NOT_SUPPORTED ? 0 : q.value;
+            out.quality_levels = quality == VA_ATTRIB_NOT_SUPPORTED ? 0 : quality;
+            out.hevc_features = attr(VAConfigAttribEncHEVCFeatures);
+            out.hevc_block_sizes = attr(VAConfigAttribEncHEVCBlockSizes);
+            out.av1_features = attr(VAConfigAttribEncAV1);
+            out.av1_ext1 = attr(VAConfigAttribEncAV1Ext1);
+            out.av1_ext2 = attr(VAConfigAttribEncAV1Ext2);
             return true;
         }
     }
