@@ -121,8 +121,13 @@ void test_proxy_relay() {
     if (!server) return;
     FrameSource src;
     {
+        // Input on its own lane: a second proxy, the same way as the first.
         Viewer v;
-        CHECK(v.open(proxy_to(name)));
+        ClientOptions o;
+        o.open_input_lane = [&](std::string*) { return proxy_to(name); };
+        CHECK(v.open(proxy_to(name), o));
+        CHECK(v.client().input_lane());
+        if (!v.client().input_lane()) std::printf("   input lane: %s\n", v.client().input_lane_error().c_str());
         WAIT(server->client_count() == 1, 10000);
         // Big enough frames that a packet spans many reads and writes.
         for (uint32_t i = 0; i < 4; ++i) {
@@ -143,6 +148,7 @@ void test_proxy_relay() {
             return got.size() >= 2;
         }));
         CHECK(got.size() == 2 && got[0] == InputEvent::key(42, true) && got[1] == InputEvent::motion(1.5f, 2.5f));
+        CHECK_EQ(server->stats().lane_inputs, uint64_t(2));
         CHECK(v.with([&] { return v.decode_errors.empty(); }));
     }
     // The viewer closing its end of the proxy ends the proxy and its connection.

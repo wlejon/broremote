@@ -23,8 +23,17 @@ struct ClientOptions {
     // picks from its own list).
     std::vector<Codec> codecs;
     uint32_t max_bitrate_kbps = 0;
-    // How long connect() waits for Welcome before giving up.
+    // How long connect() waits for Welcome before giving up (and, separately,
+    // for the input lane's Joined).
     uint32_t connect_timeout_ms = 10000;
+    // 1.2: opens a second connection to the same server, the same way the
+    // control connection was opened (another local connection, or another
+    // ssh + proxy), to carry input as a lane of its own: input then never
+    // waits behind anything on the control connection. connect() calls it
+    // first, so the two connections come up together, and joins the lane
+    // once Welcome grants it. Empty, or a server older than 1.2, or a lane
+    // that fails: input goes on the control connection.
+    std::function<std::unique_ptr<Stream>(std::string* err)> open_input_lane;
 };
 
 // Callbacks run on the client's reader thread, in message order. They are
@@ -77,6 +86,12 @@ public:
     // Measures the transport's round trip (on_pong). False, sending nothing,
     // when the server speaks 1.0 (it would answer Error(UnknownMessage)).
     bool ping();
+
+    // True while input goes on its own lane (ClientOptions::open_input_lane).
+    [[nodiscard]] bool input_lane() const;
+    // Why input is not on a lane of its own when one was asked for (empty
+    // otherwise): the lane failed to open or join, or ended.
+    [[nodiscard]] std::string input_lane_error() const;
 
     // False once the connection has ended.
     [[nodiscard]] bool connected() const;

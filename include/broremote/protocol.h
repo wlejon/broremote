@@ -17,7 +17,10 @@
 #include "broremote/frame.h"
 #include "broremote/wire.h"
 
+#include <brolink/lanes.h>
+
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,7 +31,12 @@ namespace broremote {
 inline constexpr char kProtocolMagic[4] = {'B', 'R', 'R', 'M'};
 inline constexpr uint16_t kProtocolMajor = 1;
 // 1.1 added Ping / Pong, FrameSent and the timing fields at the end of Video.
-inline constexpr uint16_t kProtocolMinor = 1;
+// 1.2 added lanes: Welcome ends with a lane grant, and a further connection
+// opens with Join instead of Hello to become the session's input lane.
+inline constexpr uint16_t kProtocolMinor = 2;
+
+// The lanes a server accepts (Join's lane name).
+inline constexpr std::string_view kInputLane = "input";
 
 // Limits a decoder enforces on what a peer sends.
 inline constexpr size_t kMaxNameBytes = 256;        // Hello / Welcome names
@@ -45,6 +53,7 @@ enum class MsgType : uint16_t {
     Input = 0x0104,
     SetCodec = 0x0105,
     Ping = 0x0106,       // 1.1
+    Join = 0x0107,       // 1.2: a lane connection's first message
     // server -> client
     Welcome = 0x0201,
     StreamConfig = 0x0202,
@@ -53,6 +62,7 @@ enum class MsgType : uint16_t {
     Error = 0x0205,
     Pong = 0x0206,       // 1.1
     FrameSent = 0x0207,  // 1.1
+    Joined = 0x0208,     // 1.2: the answer to Join
 };
 
 enum class ErrorCode : uint16_t {
@@ -64,6 +74,7 @@ enum class ErrorCode : uint16_t {
     NoCommonCodec = 5,    // SetCodec named no codec the server can encode for every client; closed
     EncoderFailed = 6,    // the encoder could not be created or failed; closed
     ServerShutdown = 7,   // the host is shutting the server down; closed
+    JoinRefused = 8,      // 1.2: a Join named no live session, the wrong token, or a lane not on offer; closed
 };
 
 [[nodiscard]] const char* error_code_name(ErrorCode) noexcept;
@@ -113,7 +124,24 @@ struct PingMsg {
     bool decode(std::string_view payload);
 };
 
+// 1.2. The first message of a further connection to the server: it joins the
+// session of the client whose Welcome carried the grant, as the named lane
+// (kInputLane). The server answers Joined, or Error(JoinRefused) and closes.
+// An input lane carries Input (and Ping); everything else stays on the
+// control connection, which ends the session, and its lanes, when it closes.
+struct JoinMsg {
+    brolink::lanes::Join join;
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
 // ---- server -> client ---------------------------------------------------------------
+
+// 1.2: the answer to a Join that succeeded. Empty body.
+struct JoinedMsg {
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
 
 struct PongMsg {
     uint64_t token = 0;           // the Ping's
@@ -136,6 +164,10 @@ struct WelcomeMsg {
     uint16_t major = kProtocolMajor;
     uint16_t minor = kProtocolMinor;
     std::string name;
+    // 1.2: what a further connection presents in Join to become one of this
+    // client's lanes (a session id and a token from the OS CSPRNG). Absent
+    // from a 1.0 / 1.1 server.
+    std::optional<brolink::lanes::Grant> grant;
     [[nodiscard]] std::string encode() const;
     bool decode(std::string_view payload);
 };

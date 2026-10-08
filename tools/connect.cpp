@@ -19,6 +19,10 @@ bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t) {
         t.pty = false;
         return true;
     }
+    if (!std::strcmp(a, "--no-input-lane")) {
+        t.input_lane = false;
+        return true;
+    }
     if (i + 1 >= argc) return false;
     if (!std::strcmp(a, "--ssh")) {
         t.ssh_host = argv[++i];
@@ -81,6 +85,11 @@ std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err) {
     const std::vector<std::string> argv = {ssh_program(t), "-tt", "-e", "none", "-o", "BatchMode=yes", "-o",
                                            "ObscureKeystrokeTiming=no", t.ssh_host, remote_command(t)};
     return await_proxy_ready(spawn_stream(argv, err));
+}
+
+std::function<std::unique_ptr<Stream>(std::string*)> input_lane_opener(const ConnectTarget& t) {
+    if (!t.input_lane) return {};
+    return [t](std::string* err) { return open_stream(t, err); };
 }
 
 }  // namespace broremote::tools

@@ -212,7 +212,29 @@ void test_messages() {
         CHECK(b.decode(m.payload));
         CHECK_EQ(b.minor, uint16_t(2));
         CHECK_EQ(b.name, std::string("srv"));
+        CHECK(!b.grant.has_value());
         check_truncations<WelcomeMsg>(a.encode());
+        // 1.2: the lane grant at the end.
+        WelcomeMsg g{1, 2, "srv"};
+        g.grant = brolink::lanes::Grant{7, *brolink::lanes::Token::generate()};
+        auto gm = unframe(g.encode(), st);
+        WelcomeMsg gb;
+        CHECK(gb.decode(gm.payload));
+        CHECK(gb.grant && gb.grant->session == 7 && gb.grant->token.equals(g.grant->token));
+        CHECK(gb.decode(std::string(gm.payload) + "future"));
+        // A grant cut short is malformed.
+        CHECK(!gb.decode(gm.payload.substr(0, gm.payload.size() - 1)));
+    }
+    {
+        JoinMsg a;
+        a.join = brolink::lanes::Join{9, *brolink::lanes::Token::generate(), std::string(kInputLane)};
+        auto m = unframe(a.encode(), st);
+        CHECK_EQ(m.type, uint16_t(MsgType::Join));
+        JoinMsg b;
+        CHECK(b.decode(m.payload));
+        CHECK(b.join.session == 9 && b.join.token.equals(a.join.token) && b.join.lane == kInputLane);
+        check_truncations<JoinMsg>(a.encode());
+        CHECK_EQ(unframe(JoinedMsg{}.encode(), st).type, uint16_t(MsgType::Joined));
     }
     {
         AckMsg a{uint64_t(1) << 40};

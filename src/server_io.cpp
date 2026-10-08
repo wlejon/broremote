@@ -1,5 +1,6 @@
-// The server's I/O thread: accept, read and dispatch client messages, and
-// write queued output, all non-blocking around one poll.
+// The server's I/O thread: brolink's event loop accepts connections and
+// reads them; between its turns this thread hands each connection's queued
+// messages to it, one at a time, and closes the connections that are done.
 #include "server_impl.h"
 
 #include <algorithm>
@@ -9,131 +10,94 @@ namespace broremote {
 namespace {
 
 constexpr auto kCloseGrace = std::chrono::milliseconds(1000);
-constexpr auto kProbeInterval = std::chrono::milliseconds(250);
-constexpr size_t kReadChunk = 64u << 10;
-constexpr size_t kMaxReadPerPass = 4u << 20;  // then let the other clients have a turn
+constexpr auto kShutdownGrace = std::chrono::milliseconds(250);
+constexpr int kIdleWaitMs = 250;
+constexpr int kClosingWaitMs = 50;
 
 SharedMessage shared(std::string s) { return std::make_shared<const std::string>(std::move(s)); }
 
 }  // namespace
 
 void Server::Impl::io_loop() {
-    std::vector<net::PollItem> items;
-    auto next_probe = Clock::now() + kProbeInterval;
-    std::unique_lock<std::mutex> lk(m);
-    while (!stop) {
-        // Poll set: the waker, the listener, then every client in order.
-        items.clear();
-        items.push_back({waker.read_fd(), true, false});
-        items.push_back({listener, true, false});
-        bool any_closing = false;
-        for (auto& c : clients) {
-            net::PollItem it;
-            it.fd = c->sock;
-            it.want_read = !c->closing;
-            it.want_write = !c->out.empty();
-            items.push_back(it);
-            any_closing = any_closing || c->closing;
-        }
-        const size_t polled = clients.size();
-        lk.unlock();
-        const bool ok = net::poll(items, any_closing ? 50 : int(kProbeInterval.count()));
-        lk.lock();
-        if (stop) break;
-        if (!ok) {
-            // A poll failure is not expected; avoid spinning on it.
-            lk.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            lk.lock();
-            continue;
-        }
-        if (items[0].readable) waker.drain();
-
-        // Every so often read every client whatever the poll said: a missed
-        // readiness event (Windows AF_UNIX does miss a peer's close) must not
-        // leave a dead client attached, holding the ack window shut.
-        const bool probe = Clock::now() >= next_probe;
-        if (probe) next_probe = Clock::now() + kProbeInterval;
-        // Clients only change on this thread, so items[2 + i] is still clients[i].
-        for (size_t i = 0; i < polled; ++i) {
-            ClientConn& c = *clients[i];
-            if ((items[2 + i].readable || probe) && !c.closing) read_client(c);
-        }
-        if (items[1].readable) {
-            for (;;) {
-                net::sock_t s = net::accept_one(listener);
-                if (s == net::kInvalidSocket) break;
-                if (!net::peer_is_same_user(s)) {
-                    net::close_socket(s);  // another user: refused without a word
-                    continue;
-                }
-                auto c = std::make_unique<ClientConn>();
-                c->id = next_client_id++;
-                c->sock = s;
-                clients.push_back(std::move(c));
+    for (;;) {
+        int wait_ms = kIdleWaitMs;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if (stop) break;
+            service_clients();
+            for (const auto& c : clients) {
+                if (c->closing) wait_ms = kClosingWaitMs;
             }
         }
-        // Write whatever is queued, including what the encode thread added.
-        const auto now = Clock::now();
-        for (auto& c : clients) {
-            if (!c->dead && !c->out.empty()) flush_client(*c);
-            if (c->closing && (c->out.empty() || now >= c->close_deadline)) c->dead = true;
-        }
-        // Drop the dead. One leaving may unpause encoding or change the codec choice.
-        bool removed = false;
-        for (auto it = clients.begin(); it != clients.end();) {
-            if ((*it)->dead) {
-                if ((*it)->attached && !(*it)->closing) attached.fetch_sub(1);
-                net::shutdown_socket((*it)->sock);
-                net::close_socket((*it)->sock);
-                it = clients.erase(it);
-                removed = true;
-            } else {
-                ++it;
-            }
-        }
-        if (removed) {
-            choose_codec();
-            encode_cv.notify_all();
-        }
+        loop->run_once(wait_ms);
     }
     shutdown_clients();
 }
 
-void Server::Impl::read_client(ClientConn& c) {
-    char buf[kReadChunk];
-    size_t total = 0;
-    while (total < kMaxReadPerPass && !c.dead && !c.closing) {
-        const long n = net::recv_some(c.sock, buf, sizeof buf);
-        if (n < 0) break;  // nothing more now
-        if (n == 0) {      // the client went away
-            c.dead = true;
-            break;
+ClientConn* Server::Impl::find(brolink::ConnId id) {
+    for (auto& c : clients) {
+        if (c->id == id) return c.get();
+    }
+    return nullptr;
+}
+
+void Server::Impl::on_accept(brolink::ConnId id) {
+    std::lock_guard<std::mutex> lk(m);
+    auto c = std::make_unique<ClientConn>();
+    c->id = id;
+    clients.push_back(std::move(c));
+}
+
+void Server::Impl::on_data(brolink::ConnId id, const char* data, size_t n) {
+    std::lock_guard<std::mutex> lk(m);
+    ClientConn* c = find(id);
+    if (stop || !c || c->dead || c->closing) return;
+    c->in.feed(data, n);
+    wire::MessageSplitter::Message msg;
+    while (!c->dead && !c->closing && c->in.next(msg)) handle_message(*c, msg.type, msg.payload);
+    if (c->in.error()) close_client(*c, ErrorCode::BadMessage, "framing error");
+}
+
+void Server::Impl::on_closed(brolink::ConnId id) {
+    std::lock_guard<std::mutex> lk(m);
+    auto it = std::find_if(clients.begin(), clients.end(), [id](const auto& c) { return c->id == id; });
+    if (it == clients.end()) return;
+    if ((*it)->attached && !(*it)->closing) attached.fetch_sub(1);
+    clients.erase(it);
+    // A client's session ends with its control connection: its lanes go too.
+    for (brolink::ConnId lane : lanes.closed(id)) {
+        if (ClientConn* l = find(lane); l && !l->closed) {
+            l->closed = true;
+            loop->close(lane, false);
         }
-        total += size_t(n);
-        c.in.feed(buf, size_t(n));
-        wire::MessageSplitter::Message msg;
-        while (!c.dead && !c.closing && c.in.next(msg)) handle_message(c, msg.type, msg.payload);
-        if (c.in.error()) close_client(c, ErrorCode::BadMessage, "framing error");
+    }
+    // One leaving may unpause encoding or change the codec choice.
+    choose_codec();
+    encode_cv.notify_all();
+}
+
+void Server::Impl::service_clients() {
+    const auto now = Clock::now();
+    for (auto& c : clients) {
+        if (c->closed) continue;
+        if (!c->dead) flush_client(*c);
+        if (c->closing && (c->out.empty() || now >= c->close_deadline)) c->dead = true;
+        if (c->dead) {
+            c->closed = true;
+            loop->close(c->id, false);  // on_closed follows on a later turn
+        }
     }
 }
 
 void Server::Impl::flush_client(ClientConn& c) {
-    while (!c.out.empty()) {
-        const std::string& front = *c.out.front();
-        if (c.out_offset == 0) c.front_started = Clock::now();
-        const long n = net::send_some(c.sock, front.data() + c.out_offset, front.size() - c.out_offset);
-        if (n == -1) return;  // the socket buffer is full; poll says when to go on
-        if (n < 0) {
-            c.dead = true;
-            return;
-        }
-        c.out_offset += size_t(n);
-        if (c.out_offset == front.size()) {
+    for (;;) {
+        if (c.handed) {
+            if (loop->pending_output(c.id) > 0) return;  // the loop says when it has gone
+            // The front message is wholly in the transport.
             const std::string* done = c.out.front().get();
-            c.out_bytes -= front.size();
+            c.out_bytes -= c.out.front()->size();
             c.out.pop_front();
-            c.out_offset = 0;
+            c.handed = false;
             if (!c.marks.empty() && c.marks.front().msg == done) {
                 // The whole Video message is in the socket: say how long it waited and took.
                 const ClientConn::SentMark mark = c.marks.front();
@@ -145,13 +109,17 @@ void Server::Impl::flush_client(ClientConn& c) {
                 queue(c, shared(fs.encode()));
             }
         }
+        if (c.out.empty() || c.dead) return;
+        c.front_started = Clock::now();
+        c.handed = true;
+        loop->write(c.id, *c.out.front());
     }
 }
 
 // Nothing that is not yet on its way matters to a client being closed, except
-// a partly written message, which must finish to keep what follows readable.
+// a message the loop already has, which must finish to keep what follows readable.
 void Server::Impl::drop_unsent(ClientConn& c) {
-    if (c.out_offset == 0) c.out.clear();
+    if (!c.handed) c.out.clear();
     else c.out.erase(c.out.begin() + 1, c.out.end());
     c.out_bytes = c.out.empty() ? 0 : c.out.front()->size();
     c.marks.clear();
@@ -170,31 +138,55 @@ void Server::Impl::close_client(ClientConn& c, ErrorCode code, const std::string
 }
 
 void Server::Impl::shutdown_clients() {
-    // Best effort: one non-blocking attempt to tell each client why.
+    // Best effort: tell each client why, giving the messages a moment to go.
     const SharedMessage bye = shared(ErrorMsg{ErrorCode::ServerShutdown, "the server is shutting down"}.encode());
-    for (auto& c : clients) {
-        if (!c->dead && !c->closing) {
+    {
+        std::lock_guard<std::mutex> lk(m);
+        for (auto& c : clients) {
+            if (c->dead || c->closing || c->closed) continue;
             drop_unsent(*c);
             c->out.push_back(bye);
-            flush_client(*c);
+            c->out_bytes += bye->size();
         }
-        net::shutdown_socket(c->sock);
-        net::close_socket(c->sock);
+    }
+    const auto until = Clock::now() + kShutdownGrace;
+    while (Clock::now() < until) {
+        bool waiting = false;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            for (auto& c : clients) {
+                if (c->closed || c->dead) continue;
+                flush_client(*c);
+                waiting = waiting || !c->out.empty();
+            }
+        }
+        if (!waiting) break;
+        loop->run_once(20);
+    }
+    std::lock_guard<std::mutex> lk(m);
+    for (auto& c : clients) {
+        if (!c->closed) loop->close(c->id, false);
     }
     clients.clear();
     attached.store(0);
+    loop->close_listener();
 }
 
 void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view payload) {
+    if (c.lane) return handle_lane_message(c, type, payload);
     const MsgType t = MsgType(type);
     if (!c.attached) {
         if (t == MsgType::Hello) handle_hello(c, payload);
-        else close_client(c, ErrorCode::HelloRequired, "the first message must be Hello");
+        else if (t == MsgType::Join) handle_join(c, payload);
+        else close_client(c, ErrorCode::HelloRequired, "the first message must be Hello (or Join)");
         return;
     }
     switch (t) {
         case MsgType::Hello:
             close_client(c, ErrorCode::BadMessage, "Hello sent twice");
+            return;
+        case MsgType::Join:
+            close_client(c, ErrorCode::BadMessage, "Join on a connection that sent Hello");
             return;
         case MsgType::Ack: {
             AckMsg a;
@@ -209,35 +201,65 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
             encode_cv.notify_all();
             return;
         }
-        case MsgType::Input: {
-            InputMsg in;
-            bool unknown_kind = false;
-            if (!in.decode(payload, &unknown_kind)) {
-                if (unknown_kind) return;  // a newer minor's input kind: ignored
-                return close_client(c, ErrorCode::BadMessage, "malformed Input");
-            }
-            std::lock_guard<std::mutex> ilk(input_m);
-            if (input.size() < kMaxQueuedInput) input.push_back(in.event);
+        case MsgType::Input:
+            handle_input(c, payload);
             return;
-        }
         case MsgType::SetCodec:
             handle_set_codec(c, payload);
             return;
-        case MsgType::Ping: {
-            PingMsg p;
-            if (!p.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Ping");
-            // Ahead of queued video (after a message partly written, which
-            // must finish first), so the round trip is the transport's.
-            SharedMessage pong = shared(PongMsg{p.token, mono_us(Clock::now())}.encode());
-            if (c.dead || c.closing) return;
-            c.out_bytes += pong->size();
-            c.out.insert(c.out.begin() + (c.out_offset > 0 ? 1 : 0), std::move(pong));
+        case MsgType::Ping:
+            handle_ping(c, payload);
             return;
-        }
         default:
             queue(c, shared(ErrorMsg{ErrorCode::UnknownMessage, "unknown message type " + std::to_string(type)}.encode()));
             return;
     }
+}
+
+// An input lane carries Input, and Ping to time it; the rest is the control
+// connection's.
+void Server::Impl::handle_lane_message(ClientConn& c, uint16_t type, std::string_view payload) {
+    switch (MsgType(type)) {
+        case MsgType::Input:
+            handle_input(c, payload);
+            return;
+        case MsgType::Ping:
+            handle_ping(c, payload);
+            return;
+        case MsgType::Hello:
+        case MsgType::Join:
+            close_client(c, ErrorCode::BadMessage, "Hello or Join on a lane");
+            return;
+        default:
+            queue(c, shared(ErrorMsg{ErrorCode::UnknownMessage,
+                                     "message type " + std::to_string(type) + " does not go on the " + c.lane_name +
+                                         " lane"}
+                                .encode()));
+            return;
+    }
+}
+
+void Server::Impl::handle_input(ClientConn& c, std::string_view payload) {
+    InputMsg in;
+    bool unknown_kind = false;
+    if (!in.decode(payload, &unknown_kind)) {
+        if (unknown_kind) return;  // a newer minor's input kind: ignored
+        return close_client(c, ErrorCode::BadMessage, "malformed Input");
+    }
+    std::lock_guard<std::mutex> ilk(input_m);
+    if (input.size() < kMaxQueuedInput) input.push_back(in.event);
+    if (c.lane) ++lane_inputs;
+}
+
+void Server::Impl::handle_ping(ClientConn& c, std::string_view payload) {
+    PingMsg p;
+    if (!p.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Ping");
+    // Ahead of queued video (after a message the loop already has, which must
+    // finish first), so the round trip is the transport's.
+    SharedMessage pong = shared(PongMsg{p.token, mono_us(Clock::now())}.encode());
+    if (c.dead || c.closing) return;
+    c.out_bytes += pong->size();
+    c.out.insert(c.out.begin() + (c.handed ? 1 : 0), std::move(pong));
 }
 
 void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
@@ -252,12 +274,33 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
     c.minor = h.minor;
     c.attached = true;
     attached.fetch_add(1);
-    queue(c, shared(WelcomeMsg{kProtocolMajor, kProtocolMinor, cfg.name}.encode()));
+    WelcomeMsg w{kProtocolMajor, kProtocolMinor, cfg.name};
+    // The client's session: further connections join it as lanes with this
+    // grant. Without one (the OS refused random bytes) the client simply
+    // has no lanes and sends everything on this connection.
+    if (auto grant = lanes.open(c.id)) w.grant = *grant;
+    queue(c, shared(w.encode()));
     if (stream) queue(c, shared(stream->encode()));
     if (cursor_set) queue(c, shared(CursorMsg{cursor}.encode()));
     // A joining client starts at a keyframe: the next frame is one.
     keyframe_requested = true;
     encode_cv.notify_all();
+}
+
+void Server::Impl::handle_join(ClientConn& c, std::string_view payload) {
+    JoinMsg j;
+    if (!j.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Join");
+    if (j.join.lane != kInputLane) {
+        return close_client(c, ErrorCode::JoinRefused, "there is no '" + j.join.lane + "' lane here");
+    }
+    const brolink::lanes::JoinResult r = lanes.join(c.id, j.join);
+    if (r != brolink::lanes::JoinResult::Joined) {
+        return close_client(c, ErrorCode::JoinRefused, brolink::lanes::join_result_name(r));
+    }
+    c.lane = true;
+    c.lane_name = j.join.lane;
+    ++stats.lanes;
+    queue(c, shared(JoinedMsg{}.encode()));
 }
 
 void Server::Impl::handle_set_codec(ClientConn& c, std::string_view payload) {

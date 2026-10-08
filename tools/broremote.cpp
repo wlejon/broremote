@@ -230,6 +230,8 @@ int cmd_serve_test(int argc, char** argv) {
                  "submitted while at the ack window %llu\n",
                  (unsigned long long)st.submitted, (unsigned long long)st.encoded, (unsigned long long)st.keyframes,
                  (unsigned long long)st.replaced, (unsigned long long)st.window_waits);
+    std::fprintf(stderr, "broremote serve-test: %llu input lanes joined, %llu inputs arrived on them\n",
+                 (unsigned long long)st.lanes, (unsigned long long)st.lane_inputs);
     server.reset();
     std::fprintf(stderr, "broremote serve-test: stopped after %llu frames\n", static_cast<unsigned long long>(n));
     return 0;

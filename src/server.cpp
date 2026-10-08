@@ -29,12 +29,16 @@ std::unique_ptr<Server> Server::create(const ServerConfig& cfg, std::string* err
     impl->want_codec = impl->server_codecs.front();
     impl->want_kbps = impl->cfg.bitrate_kbps;
 
-    if (!net::init(err)) return nullptr;
     impl->path = broremote::socket_path(cfg.socket_name, err);
     if (impl->path.empty()) return nullptr;
-    if (!impl->waker.open(err)) return nullptr;
-    impl->listener = net::listen_at(impl->path, err);
-    if (impl->listener == net::kInvalidSocket) return nullptr;
+    impl->loop = brolink::EventLoop::create(*impl);
+    impl->waker.loop = impl->loop.get();
+    std::string lerr;
+    bool in_use = false;
+    if (!impl->loop->listen(impl->path, lerr, in_use)) {
+        if (err) *err = in_use ? "a server is already listening at " + impl->path : lerr;
+        return nullptr;
+    }
 
     Impl* p = impl.get();
     p->io_thread = std::thread([p] { p->io_loop(); });
@@ -62,8 +66,10 @@ Server::~Server() {
         held.swap(s.pending);
     }
     if (held && held->release) held->release();
-    net::close_socket(s.listener);
-    net::remove_path(s.path);
+    // The I/O thread closed the listener (removing the endpoint) and every
+    // connection; the loop goes once nothing else can reach it.
+    s.waker.loop = nullptr;
+    s.loop.reset();
 }
 
 void Server::submit(const Frame& frame, std::function<void()> release) {
@@ -130,8 +136,14 @@ std::optional<Server::StreamInfo> Server::stream() const {
 }
 
 Server::Stats Server::stats() const {
-    std::lock_guard<std::mutex> lk(impl_->m);
-    return impl_->stats;
+    Stats s;
+    {
+        std::lock_guard<std::mutex> lk(impl_->m);
+        s = impl_->stats;
+    }
+    std::lock_guard<std::mutex> ilk(impl_->input_m);
+    s.lane_inputs = impl_->lane_inputs;
+    return s;
 }
 
 // ---- shared helpers -------------------------------------------------------------------

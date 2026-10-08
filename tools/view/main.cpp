@@ -22,6 +22,8 @@ int usage() {
                  "                      where present, else ssh from PATH)\n"
                  "  --ssh-pty           run the proxy on a raw remote terminal (ssh -tt: OpenSSH turns\n"
                  "                      Nagle off); --ssh-no-pty is the default ssh -T pipe\n"
+                 "  --no-input-lane     send input on the control connection, not on a second\n"
+                 "                      connection (a second ssh with --ssh) of its own\n"
                  "  --any-codec         do not tell the server which codecs decode here\n"
                  "  --fullscreen        start fullscreen (Ctrl+Alt+Enter toggles)\n"
                  "  --size WxH          initial window size (default: fit the stream)\n"

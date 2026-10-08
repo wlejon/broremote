@@ -620,6 +620,128 @@ void test_timing() {
     CHECK(src.all_released_once());
 }
 
+// 1.2: input on a lane of its own.
+void test_lanes() {
+    check::phase("lanes: the Client's input lane");
+    const std::string name = unique_name("lanes");
+    auto server = make_server(name);
+    if (!server) {
+        CHECK(false);
+        return;
+    }
+    {
+        Viewer v;
+        ClientOptions o;
+        o.open_input_lane = [&](std::string* err) { return connect_local(name, err); };
+        CHECK(v.open(dial(name), o));
+        CHECK(v.client().welcome().grant.has_value());
+        CHECK(v.client().input_lane());
+        CHECK(v.client().input_lane_error().empty());
+        WAIT(server->client_count() == 1, 5000);
+        const std::vector<InputEvent> sent = {InputEvent::key(30, true), InputEvent::key(30, false),
+                                              InputEvent::motion(1.5f, 2.5f)};
+        for (const auto& e : sent) v.client().send_input(e);
+        std::vector<InputEvent> got;
+        CHECK(check::wait_for([&] {
+            server->drain_input(got);
+            return got.size() >= sent.size();
+        }));
+        CHECK(got == sent);
+        CHECK_EQ(server->stats().lanes, uint64_t(1));
+        CHECK_EQ(server->stats().lane_inputs, uint64_t(3));
+        // A lane is not a client.
+        CHECK_EQ(server->client_count(), size_t(1));
+        v.close();
+    }
+    {
+        // Without an opener, input stays on the control connection.
+        Viewer v;
+        CHECK(v.open(dial(name)));
+        CHECK(!v.client().input_lane());
+        v.client().send_input(InputEvent::key(1, true));
+        std::vector<InputEvent> got;
+        CHECK(check::wait_for([&] {
+            server->drain_input(got);
+            return got.size() == 1;
+        }));
+        CHECK_EQ(server->stats().lane_inputs, uint64_t(3));
+        v.close();
+    }
+    {
+        // An opener that fails: the client connects anyway and says why.
+        Viewer v;
+        ClientOptions o;
+        o.open_input_lane = [](std::string* err) -> std::unique_ptr<Stream> {
+            *err = "no route";
+            return nullptr;
+        };
+        CHECK(v.open(dial(name), o));
+        CHECK(!v.client().input_lane());
+        CHECK(v.client().input_lane_error().find("no route") != std::string::npos);
+        v.close();
+    }
+
+    check::phase("lanes: Join refused");
+    {
+        auto control = std::make_unique<RawPeer>(dial(name));
+        control->s->write(HelloMsg{}.encode());
+        WAIT(control->got(MsgType::Welcome), 5000);
+        WelcomeMsg w;
+        {
+            std::lock_guard<std::mutex> lk(control->m);
+            for (auto& [t, p] : control->msgs) {
+                if (MsgType(t) == MsgType::Welcome) CHECK(w.decode(p));
+            }
+        }
+        CHECK(w.grant.has_value());
+        if (!w.grant) return;
+        auto join = [&](const brolink::lanes::Join& j) {
+            auto p = std::make_unique<RawPeer>(dial(name));
+            p->s->write(JoinMsg{j}.encode());
+            return p;
+        };
+        brolink::lanes::Join good{w.grant->session, w.grant->token, std::string(kInputLane)};
+        brolink::lanes::Join wrong = good;
+        wrong.token.bytes[5] ^= 0x40;
+        brolink::lanes::Join unknown = good;
+        unknown.lane = "video";
+        brolink::lanes::Join nosession = good;
+        nosession.session += 1000;
+        for (const auto& j : {wrong, unknown, nosession}) {
+            auto p = join(j);
+            WAIT(p->closed(), 5000);
+            CHECK(p->error() == ErrorCode::JoinRefused);
+        }
+        auto lane = join(good);
+        WAIT(lane->got(MsgType::Joined), 5000);
+        CHECK(!lane->error());
+        // Each lane joins once.
+        auto again = join(good);
+        WAIT(again->closed(), 5000);
+        CHECK(again->error() == ErrorCode::JoinRefused);
+        // On a lane: Input and Ping; anything else is answered, not acted on.
+        lane->s->write(InputMsg{InputEvent::key(7, true)}.encode());
+        lane->s->write(PingMsg{42}.encode());
+        lane->s->write(AckMsg{1}.encode());
+        WAIT(lane->got(MsgType::Pong), 5000);
+        WAIT(lane->error() == ErrorCode::UnknownMessage, 5000);
+        CHECK(!lane->closed());
+        std::vector<InputEvent> got;
+        CHECK(check::wait_for([&] {
+            server->drain_input(got);
+            return got.size() == 1;
+        }));
+        // The control connection closing ends its lanes.
+        control.reset();
+        WAIT(lane->closed(), 5000);
+        CHECK(lane->closed());
+        // And the grant is dead with it.
+        auto late = join(good);
+        WAIT(late->closed(), 5000);
+        CHECK(late->error() == ErrorCode::JoinRefused);
+    }
+}
+
 void test_client_side() {
     check::phase("client: connect failures");
     std::string err;
@@ -684,6 +806,7 @@ int main() {
     test_codec_negotiation();
     test_protocol_errors();
     test_timing();
+    test_lanes();
     test_client_side();
     return check::finish();
 }

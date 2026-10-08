@@ -5,6 +5,7 @@
 
 #include "broremote/stream.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -20,13 +21,18 @@ struct ConnectTarget {
     // ssh -tt and `proxy --pty` (low delay: OpenSSH sets TCP_NODELAY only on
     // a terminal session), or -T and a plain pipe (--ssh-no-pty).
     bool pty = false;
+    // Input on a lane of its own (protocol 1.2): a second connection opened
+    // the same way as the first (a second ssh with --ssh). --no-input-lane
+    // sends input on the control connection instead.
+    bool input_lane = true;
 
     [[nodiscard]] bool remote() const { return !ssh_host.empty(); }
     // "halo" or "socket default", for titles and messages.
     [[nodiscard]] std::string describe() const;
 };
 
-// Consumes --ssh HOST, --ssh-command CMD or --socket NAME at argv[i]
+// Consumes --ssh HOST, --ssh-command CMD, --socket NAME, --ssh-program P,
+// --ssh-pty, --ssh-no-pty or --no-input-lane at argv[i]
 // (advancing i past the value). False when argv[i] is none of them.
 bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t);
 
@@ -44,5 +50,9 @@ std::string remote_command(const ConnectTarget& t);
 
 // The stream: ssh's stdio, or the local socket. Null with *err on failure.
 std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err);
+
+// ClientOptions::open_input_lane for `t`: another open_stream(t), or empty
+// with --no-input-lane.
+std::function<std::unique_ptr<Stream>(std::string*)> input_lane_opener(const ConnectTarget& t);
 
 }  // namespace broremote::tools

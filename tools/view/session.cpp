@@ -150,6 +150,8 @@ void Session::connect_thread(SessionOptions options) {
     // codec once) overlaps with ssh starting up.
     const std::vector<Codec> decoders = brovideo::codecs(brovideo::Direction::Decode);
     if (options.negotiate) co.codecs = decoders;
+    // Input on a lane of its own: a second connection opened like the first.
+    co.open_input_lane = tools::input_lane_opener(options.target);
 
     ClientHandlers h;
     h.on_config = [this](const StreamConfig& sc) {
@@ -212,6 +214,12 @@ void Session::connect_thread(SessionOptions options) {
             client_ = std::move(c);
             live_ = client_.get();
             status_.server = client_->welcome().name;
+            if (client_->input_lane()) {
+                std::fprintf(stderr, "broremote-view: input on its own lane\n");
+            } else if (!client_->input_lane_error().empty()) {
+                std::fprintf(stderr, "broremote-view: input on the control connection: %s\n",
+                             client_->input_lane_error().c_str());
+            }
             // The connection may already have ended (on_closed ran).
             if (status_.state == SessionState::Connecting) status_.state = SessionState::Connected;
         }

@@ -23,6 +23,7 @@ const char* error_code_name(ErrorCode c) noexcept {
         case ErrorCode::NoCommonCodec: return "no common codec";
         case ErrorCode::EncoderFailed: return "encoder failed";
         case ErrorCode::ServerShutdown: return "server shutdown";
+        case ErrorCode::JoinRefused: return "join refused";
     }
     return "unknown error";
 }
@@ -143,6 +144,7 @@ std::string WelcomeMsg::encode() const {
     w.u16(major);
     w.u16(minor);
     w.str(name);
+    if (grant) grant->write(w);
     return message(MsgType::Welcome, w);
 }
 
@@ -151,8 +153,30 @@ bool WelcomeMsg::decode(std::string_view payload) {
     major = r.u16();
     minor = r.u16();
     name = r.str_max(kMaxNameBytes);
-    return r.ok();
+    if (!r.ok()) return false;
+    grant.reset();
+    if (!r.at_end()) {
+        brolink::lanes::Grant g;
+        if (!g.read(r)) return false;
+        grant = g;
+    }
+    return true;
 }
+
+std::string JoinMsg::encode() const {
+    wire::Writer w;
+    join.write(w);
+    return message(MsgType::Join, w);
+}
+
+bool JoinMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    return join.read(r);
+}
+
+std::string JoinedMsg::encode() const { return wire::make_message(uint16_t(MsgType::Joined), {}); }
+
+bool JoinedMsg::decode(std::string_view) { return true; }
 
 std::string StreamConfig::encode() const {
     wire::Writer w;

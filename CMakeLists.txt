@@ -37,11 +37,11 @@ endif()
 find_package(Threads REQUIRED)
 
 # ---- library -------------------------------------------------------------------
-# The core (wire, protocol, streams, server, client) needs nothing beyond the
-# platform and brovideo, which holds every codec (Raw, VA-API, Media
-# Foundation) and decides at run time which of them this machine has.
+# The core (protocol, server, client) needs brolink, which carries it (the
+# framing, the local listener and streams, the ssh proxy, lanes), and
+# brovideo, which holds every codec (Raw, VA-API, Media Foundation) and
+# decides at run time which of them this machine has.
 set(BROREMOTE_SOURCES
-    src/wire.cpp
     src/protocol.cpp
     src/paths_common.cpp
     src/server.cpp
@@ -50,21 +50,6 @@ set(BROREMOTE_SOURCES
     src/client.cpp
     src/proxy.cpp
 )
-if(WIN32)
-    list(APPEND BROREMOTE_SOURCES
-        src/win/socket_win.cpp
-        src/win/stream_win.cpp
-        src/win/spawn_win.cpp
-        src/win/paths_win.cpp
-    )
-else()
-    list(APPEND BROREMOTE_SOURCES
-        src/posix/socket_posix.cpp
-        src/posix/stream_posix.cpp
-        src/posix/spawn_posix.cpp
-        src/posix/paths_posix.cpp
-    )
-endif()
 
 add_library(broremote STATIC ${BROREMOTE_SOURCES})
 add_library(broremote::broremote ALIAS broremote)
@@ -82,9 +67,25 @@ target_include_directories(broremote
 target_link_libraries(broremote PUBLIC Threads::Threads)
 target_compile_definitions(broremote PRIVATE BROREMOTE_VERSION_STRING="${PROJECT_VERSION}")
 if(WIN32)
-    target_link_libraries(broremote PRIVATE ws2_32 advapi32)
     target_compile_definitions(broremote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
+# ---- brolink: the transport ---------------------------------------------------------
+# An existing brolink target (bro, or bromux beside it, added it), else
+# -DBROLINK_DIR, else a checkout beside this one (../brolink).
+if(NOT TARGET brolink)
+    if(DEFINED BROLINK_DIR AND EXISTS "${BROLINK_DIR}/CMakeLists.txt")
+        # Explicit BROLINK_DIR supplied
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brolink/CMakeLists.txt")
+        set(BROLINK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brolink" CACHE PATH "brolink source tree")
+    endif()
+    if(NOT BROLINK_DIR OR NOT EXISTS "${BROLINK_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "brolink not found: check it out beside this repository (../brolink) or pass -DBROLINK_DIR=<path>.")
+    endif()
+    set(BROLINK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${BROLINK_DIR}" "${CMAKE_BINARY_DIR}/brolink" EXCLUDE_FROM_ALL)
+endif()
+target_link_libraries(broremote PUBLIC brolink::brolink)
 # ---- brovideo: the codecs ----------------------------------------------------------
 # An existing brovideo target (bro builds it), else -DBROVIDEO_DIR, else a
 # checkout beside this one (../brovideo). Its backends are its own options

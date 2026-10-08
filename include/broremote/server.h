@@ -22,7 +22,7 @@
 namespace broremote {
 
 struct ServerConfig {
-    std::string socket_name = "default";        // the socket file is <runtime dir>/<name>.sock (stream.h)
+    std::string socket_name = "default";        // where it listens: a socket or pipe named for it (stream.h)
     std::vector<Codec> codecs = {Codec::HEVC, Codec::H264};  // preference order; those this build cannot encode are skipped
     uint32_t bitrate_kbps = 20000;
     uint32_t fps = 60;                          // a hint for the encoder and the viewer
@@ -66,6 +66,7 @@ public:
     [[nodiscard]] size_t client_count() const;
     // False when no client is attached: the host can skip submitting.
     [[nodiscard]] bool wants_frames() const;
+    // The address it listens on: a socket path, or a pipe name on Windows.
     [[nodiscard]] const std::string& socket_path() const;
 
     // The stream clients were last sent: the codec and size being encoded and
@@ -88,6 +89,8 @@ public:
         uint64_t failed = 0;      // released unencoded: the encoder failed
         uint64_t streams = 0;     // StreamConfigs made (one per reconfigure)
         uint64_t window_waits = 0;  // frames submitted while a client was at its ack window (they wait)
+        uint64_t lanes = 0;         // lanes joined (1.2: a viewer's input lane)
+        uint64_t lane_inputs = 0;   // Input messages that arrived on an input lane
     };
     [[nodiscard]] Stats stats() const;
 

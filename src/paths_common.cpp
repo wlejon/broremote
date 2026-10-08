@@ -1,15 +1,32 @@
+// Where the server listens, and connecting to it (brolink's transport).
 #include "broremote/stream.h"
+
+#include <brolink/paths.h>
 
 namespace broremote {
 
+namespace {
+constexpr std::string_view kAppName = "broremote";
+}
+
 bool valid_socket_name(std::string_view name) noexcept {
-    if (name.empty() || name.size() > 64 || name.front() == '.') return false;
-    for (char c : name) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
-                        c == '_' || c == '-';
-        if (!ok) return false;
+    return !name.empty() && name.front() != '.' && brolink::valid_name(name);
+}
+
+std::string socket_path(std::string_view name, std::string* err) {
+    if (name.empty()) name = kDefaultSocketName;
+    if (!valid_socket_name(name)) {
+        if (err) *err = "invalid socket name '" + std::string(name) + "'";
+        return {};
     }
-    return true;
+    return brolink::local_address(kAppName, name, err);
+}
+
+std::unique_ptr<Stream> connect_local(std::string_view name, std::string* err, bool* not_running) {
+    if (not_running) *not_running = false;
+    const std::string address = socket_path(name, err);
+    if (address.empty()) return nullptr;
+    return brolink::connect_local(address, err, not_running);
 }
 
 }  // namespace broremote
