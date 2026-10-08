@@ -33,7 +33,9 @@ include/broremote/
   codec.h       Codec, EncoderConfig, Encoder / Decoder interfaces and the factory
   server.h      Server: the host submits frames and drains input
   client.h      Client: connects, receives packets, sends input
+  api.h         the JavaScript binding's public header (forwards to src/api)
 src/            implementation; src/posix, src/win for platform pieces
+src/api/        broremote_api, the bronze JavaScript binding (bro.remote)
 src/codec_factory.cpp, src/codec_backends.h
                 the factory: the one place a backend registers
 src/vaapi/      VA-API encoder (Linux): va_device (nodes, probe), va_source
@@ -55,7 +57,9 @@ tests/          ctest suite; tests/fixtures holds recorded VA-API streams
 CMake target `broremote` (alias `broremote::broremote`). Options:
 `BROREMOTE_BUILD_TESTS`, `BROREMOTE_BUILD_TOOLS`, `BROREMOTE_BUILD_VIEWER`
 (on when SDL3 is found), `BROREMOTE_WITH_VAAPI` (auto on Linux when libva and
-libva-drm are found), `BROREMOTE_WITH_MF` (on for Windows). A disabled backend
+libva-drm are found), `BROREMOTE_WITH_MF` (on for Windows),
+`BROREMOTE_ENABLE_API` (off; bro turns it on: builds `broremote_api` and its
+test against bronze, below). A disabled backend
 is simply absent from the codec factory; nothing else changes. A backend adds
 its sources and defines `BROREMOTE_HAVE_VAAPI` / `BROREMOTE_HAVE_MF` on the
 `broremote` target; `src/codec_backends.h` declares its entry points
@@ -77,7 +81,10 @@ vcpkg's x64-windows SDL3 is a DLL with the dynamic CRT. That mix is sound
 and deliberate: SDL's API never passes CRT objects (heap blocks, FILE*)
 across the DLL boundary (what it allocates is freed with `SDL_free`), so
 each side keeps its own CRT, the import library adds no conflicting default
-libraries, and `broremote.exe` stays free of the VC++ runtime. Inside bro,
+libraries, and `broremote.exe` stays free of the VC++ runtime. With
+`BROREMOTE_ENABLE_API` the top-level build uses the DLL CRT instead, because
+bronze's shared runtime (`bronze_runtime_shared`) hands CRT objects across its
+boundary. Inside bro,
 broremote sets no CRT of its own and `SDL3::SDL3` is bro's static SDL built
 with bro's settings, so nothing mixes there.
 
@@ -227,6 +234,9 @@ public:
     bool wants_frames() const;   // false when no client is attached: the host can skip submitting
     const std::string& socket_path() const;
     Stats stats() const;         // submitted / encoded / keyframes / replaced / unwatched / failed / streams
+    // The stream being sent ({codec, width, height, bitrate_kbps}), or
+    // nullopt before the first frame is encoded.
+    std::optional<StreamInfo> stream() const;
 };
 ```
 
@@ -544,6 +554,21 @@ to the shell or a client exactly as local input does. helm decides whether to
 host, through broremote's JavaScript binding (`broremote_api`, optional,
 gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
 
+### The JavaScript binding (src/api)
+
+`bro.remote` owns the Server: `host({socket, codecs, bitrateKbps, fps,
+name})` makes one (the same options again keep it; others replace it),
+`stop()` destroys it, `status()` reports it (clients, the stream from
+`Server::stream()`, `stats()`), `codecs()` is `available_encoders()`, and
+`attach` / `detach` events fire as the client count changes. The binding
+never names the host: the host sets `HostHooks` before `installRemote()`,
+and `serverChanged(server, config)` tells it when a server starts and just
+before one is destroyed; between the two the host submits frames, drains
+input and sets the cursor itself. `tickRemote()` (once per host frame)
+delivers the events; `shutdownRemote()` stops the server before the host
+goes away. One server per process: a page reload keeps it, and the new
+realm's `status()` sees it. bro's docs/remote-api.js is the reference.
+
 ## Testing
 
 - Wire and protocol: round-trip every message; hostile lengths and counts fail
@@ -594,5 +619,12 @@ gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
   mapping and clamping, buttons, wheel units and fractions, key codes, no
   auto-repeat, the fullscreen hotkey kept local, release on focus loss; then
   a stream size change and the mapping following it.
+- The binding (tests/test_api.cpp, `BROREMOTE_ENABLE_API`; needs ../bronze
+  and ../brass): a bronze realm with the hooks set and `bro.remote`
+  installed; option errors, host / same-options no-op / replace / stop and
+  the hook calls each makes, attach and detach from a real Client, a CPU
+  frame through the server the hook handed over and the stream it shows in
+  `status()`, listeners added and removed, a GC-stress loop, and
+  `shutdownRemote()`.
 - End to end: `serve-test` on the halo, `broremote-view --ssh halo
   --frames N --check-pattern` on Windows (by hand; numbers above).

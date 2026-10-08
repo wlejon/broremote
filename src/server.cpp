@@ -117,6 +117,17 @@ bool Server::wants_frames() const { return impl_->attached.load() > 0; }
 
 const std::string& Server::socket_path() const { return impl_->path; }
 
+std::optional<Server::StreamInfo> Server::stream() const {
+    std::lock_guard<std::mutex> lk(impl_->m);
+    if (!impl_->stream) return std::nullopt;
+    StreamInfo info;
+    info.codec = impl_->stream->codec;
+    info.width = impl_->stream->width;
+    info.height = impl_->stream->height;
+    info.bitrate_kbps = impl_->stream_kbps;
+    return info;
+}
+
 Server::Stats Server::stats() const {
     std::lock_guard<std::mutex> lk(impl_->m);
     return impl_->stats;

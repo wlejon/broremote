@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -66,6 +67,17 @@ public:
     // False when no client is attached: the host can skip submitting.
     [[nodiscard]] bool wants_frames() const;
     [[nodiscard]] const std::string& socket_path() const;
+
+    // The stream clients were last sent: the codec and size being encoded and
+    // the bitrate in force. Empty before the first frame was encoded, and
+    // after the encoder failed.
+    struct StreamInfo {
+        Codec codec = Codec::Raw;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t bitrate_kbps = 0;
+    };
+    [[nodiscard]] std::optional<StreamInfo> stream() const;
 
     struct Stats {
         uint64_t submitted = 0;   // frames passed to submit()

@@ -113,6 +113,7 @@ void test_basic_stream() {
         WAIT(server->client_count() == 1, 5000);
         CHECK(server->wants_frames());
         CHECK_EQ(v.config_count(), size_t(0));  // no frame yet, so no stream
+        CHECK(!server->stream().has_value());
 
         for (uint32_t i = 0; i < 5; ++i) {
             auto& s = src.submit(*server, 64, 48, i);
@@ -130,6 +131,14 @@ void test_basic_stream() {
         CHECK_EQ(sc.width, 64u);
         CHECK_EQ(sc.height, 48u);
         CHECK_EQ(sc.fps, 60u);
+        const auto info = server->stream();
+        CHECK(info.has_value());
+        if (info) {
+            CHECK_EQ(info->codec, Codec::Raw);
+            CHECK_EQ(info->width, 64u);
+            CHECK_EQ(info->height, 48u);
+            CHECK_EQ(info->bitrate_kbps, 20000u);
+        }
         CHECK(v.with([&] { return v.decode_errors.empty(); }));
         auto st = server->stats();
         CHECK_EQ(st.encoded, uint64_t(5));

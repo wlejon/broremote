@@ -13,13 +13,26 @@ if(MSVC)
         $<$<COMPILE_LANGUAGE:CXX>:/utf-8>
     )
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
-    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    endif()
 endif()
 
 option(BROREMOTE_BUILD_TESTS "Build the broremote test suite" ON)
 option(BROREMOTE_BUILD_TOOLS "Build the broremote command-line tool" ON)
+# The JavaScript binding (src/api, broremote_api): off by default, so the
+# library builds with nothing beside it; bro, which mounts it, turns it on.
+# It needs bronze (and brass) checked out beside this repository.
+option(BROREMOTE_ENABLE_API "Build the Bronze JavaScript API (bro.remote)" OFF)
+
+# A top-level MSVC build links the CRT statically, so broremote.exe needs no
+# VC++ runtime. With the binding on it is the DLL CRT instead: the binding
+# talks to bronze's shared runtime DLL across a C++ boundary (strings,
+# std::function), which only works with one CRT heap on both sides.
+if(MSVC AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    if(BROREMOTE_ENABLE_API)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    else()
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -221,6 +234,35 @@ if(BROREMOTE_BUILD_VIEWER)
     broremote_copy_runtime_dlls(broremote_view)
 else()
     message(STATUS "broremote: broremote-view disabled (SDL3 not found)")
+endif()
+
+# ---- the JavaScript binding (broremote_api) -----------------------------------------
+# bronze, the JavaScript runtime the binding is written against: an existing
+# bronze_runtime_shared target (bro's), else a checkout beside this one
+# (../bronze, with ../brass beside it, which bronze resolves itself), or an
+# explicit -DBRONZE_DIR. No vendored fallback: the binding crosses bronze's C++
+# embed boundary, so it has to build with the bronze (and the compiler and
+# CRT) of whatever it is linked into.
+if(BROREMOTE_ENABLE_API)
+    if(NOT TARGET bronze_runtime_shared)
+        set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
+        set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+            # Explicit BRONZE_DIR supplied
+        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
+            set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
+            set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
+        endif()
+        if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "bronze not found: check it out beside this repository (../bronze, with ../brass beside it) "
+                "or pass -DBRONZE_DIR=<path>, or configure with -DBROREMOTE_ENABLE_API=OFF.")
+        endif()
+        add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
+    endif()
+    message(STATUS "broremote: JavaScript binding (broremote_api) enabled")
+    add_subdirectory(src/api)
 endif()
 
 if(BROREMOTE_BUILD_TESTS AND (PROJECT_IS_TOP_LEVEL OR BRO_BUILD_TESTS))

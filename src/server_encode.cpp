@@ -80,6 +80,7 @@ void Server::Impl::encode_loop() {
             sc.height = f.height;
             sc.fps = cfg.fps;
             stream = sc;
+            stream_kbps = kbps;
             ++stats.streams;
             queue_attached(std::make_shared<const std::string>(sc.encode()));
             for (auto& c : clients) c->synced = false;

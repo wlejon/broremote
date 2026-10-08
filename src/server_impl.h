@@ -74,6 +74,7 @@ struct Server::Impl {
     // thread changes it. `want_codec` / `want_kbps` are what the clients'
     // SetCodec ask for; a difference from the encoder's makes a new stream.
     std::optional<StreamConfig> stream;
+    uint32_t stream_kbps = 0;          // the bitrate `stream` was made with
     Codec want_codec = Codec::Raw;
     uint32_t want_kbps = 0;
     bool keyframe_requested = false;

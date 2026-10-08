@@ -51,7 +51,9 @@ ctest --test-dir build
 Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
 `BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_BUILD_VIEWER` (on when SDL3 is
 found), `BROREMOTE_WITH_VAAPI` (on on Linux when libva is found),
-`BROREMOTE_WITH_MF` (on on Windows).
+`BROREMOTE_WITH_MF` (on on Windows), `BROREMOTE_ENABLE_API` (off; the
+`bro.remote` JavaScript binding, which bro turns on; it needs ../bronze and
+../brass).
 
 SDL3 for the viewer comes from an existing `SDL3::SDL3` target or
 `find_package(SDL3)`; on Windows a vcpkg tree at `$VCPKG_ROOT`, `../vcpkg` or
