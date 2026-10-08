@@ -1,6 +1,8 @@
 #include "connect.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 
 namespace broremote::tools {
@@ -20,6 +22,8 @@ bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t) {
     if (i + 1 >= argc) return false;
     if (!std::strcmp(a, "--ssh")) {
         t.ssh_host = argv[++i];
+    } else if (!std::strcmp(a, "--ssh-program")) {
+        t.ssh_program = argv[++i];
     } else if (!std::strcmp(a, "--ssh-command")) {
         t.ssh_command = argv[++i];
         t.command_given = true;
@@ -30,6 +34,19 @@ bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t) {
         return false;
     }
     return true;
+}
+
+std::string ssh_program(const ConnectTarget& t) {
+    if (!t.ssh_program.empty()) return t.ssh_program;
+    if (const char* e = std::getenv("BROREMOTE_SSH"); e && *e) return e;
+#if defined(_WIN32)
+    if (const char* root = std::getenv("SystemRoot"); root && *root) {
+        const std::filesystem::path p = std::filesystem::path(root) / "System32" / "OpenSSH" / "ssh.exe";
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec)) return p.string();
+    }
+#endif
+    return "ssh";
 }
 
 std::string remote_command(const ConnectTarget& t) {
@@ -52,7 +69,8 @@ std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err) {
     if (!t.pty) {
         // -T: no remote tty, so the pipe is binary as it is; but OpenSSH
         // then leaves Nagle on at both ends.
-        const std::vector<std::string> argv = {"ssh", "-T", "-o", "BatchMode=yes", t.ssh_host, remote_command(t)};
+        const std::vector<std::string> argv = {ssh_program(t), "-T", "-o", "BatchMode=yes", t.ssh_host,
+                                               remote_command(t)};
         return spawn_stream(argv, err);
     }
     // -tt: a remote terminal, which is what makes OpenSSH set TCP_NODELAY
@@ -60,7 +78,7 @@ std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err) {
     // raw and says so before any protocol byte. -e none: no escape
     // character. ObscureKeystrokeTiming=no: OpenSSH 9.5+ would otherwise
     // pace a terminal session's small writes into 20 ms chaff intervals.
-    const std::vector<std::string> argv = {"ssh",       "-tt", "-e", "none", "-o", "BatchMode=yes", "-o",
+    const std::vector<std::string> argv = {ssh_program(t), "-tt", "-e", "none", "-o", "BatchMode=yes", "-o",
                                            "ObscureKeystrokeTiming=no", t.ssh_host, remote_command(t)};
     return await_proxy_ready(spawn_stream(argv, err));
 }

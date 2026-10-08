@@ -18,6 +18,10 @@ int usage() {
                  "  --ssh HOST          connect through `ssh -T HOST broremote proxy`\n"
                  "  --ssh-command CMD   run CMD on the host instead of `broremote proxy`\n"
                  "  --socket NAME       the server's socket name (local, or passed to the remote proxy)\n"
+                 "  --ssh-program PATH  the ssh to run (default: $BROREMOTE_SSH, else Windows' own OpenSSH\n"
+                 "                      where present, else ssh from PATH)\n"
+                 "  --ssh-pty           run the proxy on a raw remote terminal (ssh -tt: OpenSSH turns\n"
+                 "                      Nagle off); --ssh-no-pty is the default ssh -T pipe\n"
                  "  --any-codec         do not tell the server which codecs decode here\n"
                  "  --fullscreen        start fullscreen (Ctrl+Alt+Enter toggles)\n"
                  "  --size WxH          initial window size (default: fit the stream)\n"
@@ -29,7 +33,8 @@ int usage() {
                  "  --hidden            no visible window\n"
                  "  --stats             print where each second's frames spent their time\n"
                  "  --latency-test N    against `broremote serve-test --latency`: send N key presses,\n"
-                 "                      time each to the picture that answers it, report and exit\n");
+                 "                      time each to the picture that answers it, report and exit\n"
+                 "  --latency-motion    while probing, keep sending pointer motion too\n");
     return 2;
 }
 
@@ -55,6 +60,8 @@ int main(int argc, char** argv) {
             o.fullscreen = true;
         } else if (!std::strcmp(a, "--no-vsync")) {
             o.vsync = false;
+        } else if (!std::strcmp(a, "--latency-motion")) {
+            o.probe_motion = true;
         } else if (!std::strcmp(a, "--stats")) {
             o.stats = true;
         } else if (!std::strcmp(a, "--latency-test") && has) {

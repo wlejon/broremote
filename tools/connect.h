@@ -16,6 +16,7 @@ struct ConnectTarget {
     std::string socket = "default";               // the local socket's name
     bool socket_given = false;                    // --socket was passed
     bool command_given = false;                   // --ssh-command was passed
+    std::string ssh_program;                      // --ssh-program; empty: ssh_program() picks
     // ssh -tt and `proxy --pty` (low delay: OpenSSH sets TCP_NODELAY only on
     // a terminal session), or -T and a plain pipe (--ssh-no-pty).
     bool pty = false;
@@ -28,6 +29,14 @@ struct ConnectTarget {
 // Consumes --ssh HOST, --ssh-command CMD or --socket NAME at argv[i]
 // (advancing i past the value). False when argv[i] is none of them.
 bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t);
+
+// The ssh to run: --ssh-program, else $BROREMOTE_SSH, else on Windows the
+// system's own OpenSSH (%SystemRoot%\System32\OpenSSH\ssh.exe) when it is
+// there, else `ssh` from PATH. On Windows the PATH's ssh is often Git's
+// MSYS build, whose emulated select() on pipes holds each small write from
+// the viewer for up to a timer tick: measured from this viewer, a 5 ms mean
+// and 15 ms worst round trip against 0.7 / 1.5 ms for the system's.
+std::string ssh_program(const ConnectTarget& t);
 
 // With --ssh and --socket together, the socket name goes to the remote
 // proxy (unless --ssh-command was given, which is used as it is).

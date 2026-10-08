@@ -5,6 +5,7 @@
 #include "test_pattern.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -58,6 +59,13 @@ bool Viewer::init(std::string* err) {
         return false;
     }
     SDL_SetRenderVSync(renderer_, opt_.vsync ? 1 : SDL_RENDERER_VSYNC_DISABLED);
+    display_.init(renderer_);
+    if (opt_.stats) {
+        const SDL_DisplayMode* dm = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window_));
+        std::fprintf(stderr, "broremote-view: renderer %s, vsync %s, display %.1f Hz%s\n",
+                     SDL_GetRendererName(renderer_), opt_.vsync ? "on" : "off", dm ? double(dm->refresh_rate) : 0.0,
+                     display_.active() ? ", display timing from DXGI" : "");
+    }
     if (opt_.fullscreen) toggle_fullscreen();
     wake_type_ = SDL_RegisterEvents(1);
     session_ = std::make_unique<Session>([this] {
@@ -220,7 +228,12 @@ std::string Viewer::timing_text(const LatencyWindow& w) const {
 // One probe at a time, a quarter second or so apart (jittered so the probes
 // do not lock to the frame rate), once pictures are flowing.
 void Viewer::run_probes(Clock::time_point now) {
-    if (!opt_.latency_probes || probes_sent_ >= opt_.latency_probes || displayed_ < 30) return;
+    if (!opt_.latency_probes || probes_sent_ >= opt_.latency_probes || displayed_ < 2) return;
+    if (opt_.probe_motion) {
+        // A pointer in motion: a small message every step, as a moving mouse sends.
+        const float t = float(std::chrono::duration<double>(now - start_).count());
+        session_->send_input(InputEvent::motion(100.0f + 50.0f * std::sin(t * 3.0f), 100.0f));
+    }
     if (now < next_probe_ || session_->latency().probe_open(now)) return;
     if (session_->probe()) {
         ++probes_sent_;
@@ -237,10 +250,12 @@ void Viewer::update_title(bool force) {
     if (since >= 1.0) {
         last_window_ = session_->latency().take_window();
         if (last_window_.frames) windows_.push_back(last_window_);
+        const std::vector<double> glass = display_.take_samples();
+        last_glass_ = glass.empty() ? -1 : mean(glass);
         if (opt_.stats && shown_status_.state == SessionState::Connected) {
-            std::fprintf(stderr, "broremote-view: %.1f fps, %s\n",
+            std::fprintf(stderr, "broremote-view: %.1f fps, %s, then shown %.2f ms later\n",
                          since > 0 ? double(displayed_ - title_displayed_) / since : 0.0,
-                         timing_text(last_window_).c_str());
+                         timing_text(last_window_).c_str(), last_glass_);
         }
     }
     const SessionStatus& s = shown_status_;
@@ -310,9 +325,11 @@ bool Viewer::step(int timeout_ms) {
             const auto presented = Clock::now();
             latency_ms_.push_back(std::chrono::duration<double, std::milli>(presented - info_.received).count());
             session_->note_presented(info_.frame_id, presented);
+            display_.presented(presented);
             info_.sequence = 0;  // count each picture once
         }
     }
+    display_.poll();
     update_title(false);
     run_probes(Clock::now());
 
@@ -389,6 +406,11 @@ int Viewer::finish() {
         all.rtt = session_->latency().rtt_ms();
         std::fprintf(stderr, "  timing over %llu frames: %s\n", static_cast<unsigned long long>(all.frames),
                      timing_text(all).c_str());
+    }
+    if (!display_.all_samples().empty()) {
+        const std::vector<double>& g = display_.all_samples();
+        std::fprintf(stderr, "  present returned -> shown (DXGI, %zu presents): mean %.2f, p50 %.2f, p99 %.2f ms\n",
+                     g.size(), mean(g), percentile(g, 0.5), percentile(g, 0.99));
     }
     if (opt_.latency_probes) {
         const std::vector<Probe> ps = session_->latency().probes();

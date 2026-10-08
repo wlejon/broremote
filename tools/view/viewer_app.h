@@ -5,6 +5,7 @@
 // render thread only uploads and draws; connecting and decoding happen on
 // the Session's threads.
 
+#include "display_timing.h"
 #include "input_map.h"
 #include "session.h"
 
@@ -26,6 +27,7 @@ struct ViewerOptions {
     bool vsync = true;
     bool stats = false;         // a timing breakdown line on stderr every second
     uint32_t latency_probes = 0;  // send this many latency probes (serve-test --latency), report, exit
+    bool probe_motion = false;    // while probing, also keep the pointer moving (small messages all the time)
     bool fullscreen = false;
     bool hidden = false;        // no visible window (tests)
     int width = 0, height = 0;  // the initial window size (0: fit the stream once it is known)
@@ -91,6 +93,8 @@ private:
     std::string timing_text(const LatencyWindow& w) const;
 
     LatencyWindow last_window_;
+    DisplayTiming display_;
+    double last_glass_ = -1;  // the last window's mean present -> shown, ms (-1: unknown)
     Clock::time_point next_probe_{};
     uint64_t probes_sent_ = 0;
     std::vector<LatencyWindow> windows_;  // one per second, for the closing report
