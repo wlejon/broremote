@@ -12,6 +12,7 @@
 #include "broremote/stream.h"
 #include "test_pattern.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -37,6 +38,8 @@ int usage() {
                  "       broremote serve-test [--socket NAME] [--size WxH] [--codec raw|h264|hevc|av1] [--fps N]\n"
                  "                            [--seconds N]\n"
                  "       broremote codecs\n"
+                 "       broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS] [--fps N]\n"
+                 "                        [--keyframe-every N] [--out FILE]\n"
                  "       broremote --version\n");
     return 2;
 }
@@ -175,6 +178,89 @@ int cmd_serve_test(int argc, char** argv) {
     return 0;
 }
 
+// Encode the test pattern straight through an Encoder (no server) and write
+// the elementary stream: an oracle for the codec backends and a latency
+// measurement.
+int cmd_encode(int argc, char** argv) {
+    Codec codec = Codec::H264;
+    EncoderConfig ec;
+    ec.width = 1920;
+    ec.height = 1080;
+    uint32_t frames = 120, keyframe_every = 0;
+    std::string out_path;
+    for (int i = 0; i < argc; ++i) {
+        const char* a = argv[i];
+        const bool has = i + 1 < argc;
+        if (!std::strcmp(a, "--codec") && has) {
+            auto c = parse_codec(argv[++i]);
+            if (!c) return usage();
+            codec = *c;
+        } else if (!std::strcmp(a, "--size") && has) {
+            if (!parse_size(argv[++i], ec.width, ec.height)) return usage();
+        } else if (!std::strcmp(a, "--frames") && has) {
+            if (!parse_uint(argv[++i], frames)) return usage();
+        } else if (!std::strcmp(a, "--bitrate") && has) {
+            if (!parse_uint(argv[++i], ec.bitrate_kbps)) return usage();
+        } else if (!std::strcmp(a, "--fps") && has) {
+            if (!parse_uint(argv[++i], ec.fps) || ec.fps == 0) return usage();
+        } else if (!std::strcmp(a, "--keyframe-every") && has) {
+            if (!parse_uint(argv[++i], keyframe_every)) return usage();
+        } else if (!std::strcmp(a, "--out") && has) {
+            out_path = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    std::string err;
+    auto enc = create_encoder(codec, ec, &err);
+    if (!enc) {
+        std::fprintf(stderr, "broremote encode: %s\n", err.c_str());
+        return 1;
+    }
+    std::FILE* out = nullptr;
+    if (!out_path.empty() && !(out = std::fopen(out_path.c_str(), "wb"))) {
+        std::fprintf(stderr, "broremote encode: cannot write %s\n", out_path.c_str());
+        return 1;
+    }
+    std::vector<uint8_t> pixels(size_t(ec.width) * ec.height * 4);
+    std::vector<double> ms;
+    uint64_t bytes = 0;
+    int rc = 0;
+    for (uint32_t n = 0; n < frames; ++n) {
+        tools::draw_test_pattern(pixels.data(), ec.width, ec.height, n);
+        Frame f;
+        f.width = ec.width;
+        f.height = ec.height;
+        f.cpu = pixels.data();
+        f.pts_ns = int64_t(n) * 1000000000ll / ec.fps;
+        EncodedPacket pkt;
+        const bool key = keyframe_every && n % keyframe_every == 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!enc->encode(f, key, [] {}, pkt, &err)) {
+            std::fprintf(stderr, "broremote encode: frame %u: %s\n", n, err.c_str());
+            rc = 1;
+            break;
+        }
+        ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        bytes += pkt.data.size();
+        if (out) std::fwrite(pkt.data.data(), 1, pkt.data.size(), out);
+    }
+    if (out) std::fclose(out);
+    if (!ms.empty()) {
+        // The first frame opens the device; report it apart from the rest.
+        std::vector<double> rest(ms.begin() + 1, ms.end());
+        std::sort(rest.begin(), rest.end());
+        double sum = 0;
+        for (double v : rest) sum += v;
+        const auto pct = [&](double p) { return rest.empty() ? 0.0 : rest[size_t(p * double(rest.size() - 1))]; };
+        std::printf("%s %ux%u: %zu frames, %.1f kbit/frame; first %.2f ms; then mean %.2f, p50 %.2f, p99 %.2f, max %.2f ms\n",
+                    codec_name(codec), ec.width, ec.height, ms.size(), double(bytes) * 8 / 1000 / double(ms.size()),
+                    ms[0], rest.empty() ? 0.0 : sum / double(rest.size()), pct(0.5), pct(0.99),
+                    rest.empty() ? 0.0 : rest.back());
+    }
+    return rc;
+}
+
 int cmd_codecs() {
     std::printf("encode:");
     for (Codec c : available_encoders()) std::printf(" %s", codec_name(c));
@@ -192,6 +278,7 @@ int main(int argc, char** argv) {
     if (cmd == "proxy") return cmd_proxy(argc - 2, argv + 2);
     if (cmd == "serve-test") return cmd_serve_test(argc - 2, argv + 2);
     if (cmd == "codecs") return cmd_codecs();
+    if (cmd == "encode") return cmd_encode(argc - 2, argv + 2);
     if (cmd == "--version") {
         std::printf("broremote %s, protocol %u.%u\n", "0.1.0", unsigned(kProtocolMajor), unsigned(kProtocolMinor));
         return 0;

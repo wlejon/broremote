@@ -74,6 +74,41 @@ if(WIN32)
     target_link_libraries(broremote PRIVATE ws2_32 advapi32)
     target_compile_definitions(broremote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
+# ---- VA-API encoder (Linux) ------------------------------------------------------
+# Auto: on when libva, libva-drm and libdrm (for the fourcc header) are found.
+if(UNIX AND NOT APPLE)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(BROREMOTE_VA IMPORTED_TARGET GLOBAL libva libva-drm libdrm)
+    endif()
+    if(BROREMOTE_VA_FOUND)
+        set(_broremote_vaapi_default ON)
+    else()
+        set(_broremote_vaapi_default OFF)
+    endif()
+    option(BROREMOTE_WITH_VAAPI "Build the VA-API encoder" ${_broremote_vaapi_default})
+    if(BROREMOTE_WITH_VAAPI AND NOT BROREMOTE_VA_FOUND)
+        message(FATAL_ERROR "BROREMOTE_WITH_VAAPI is ON but libva, libva-drm and libdrm were not all found")
+    endif()
+    if(BROREMOTE_WITH_VAAPI)
+        message(STATUS "broremote: VA-API encoder enabled (libva ${BROREMOTE_VA_libva_VERSION})")
+        target_sources(broremote PRIVATE
+            src/vaapi/va_util.cpp
+            src/vaapi/va_device.cpp
+            src/vaapi/va_source.cpp
+            src/vaapi/va_vpp.cpp
+            src/vaapi/va_encoder.cpp
+            src/vaapi/va_h264.cpp
+        )
+        target_compile_definitions(broremote PRIVATE BROREMOTE_HAVE_VAAPI)
+        target_link_libraries(broremote PRIVATE PkgConfig::BROREMOTE_VA)
+    else()
+        message(STATUS "broremote: VA-API encoder disabled (libva, libva-drm and libdrm not all found)")
+    endif()
+else()
+    set(BROREMOTE_WITH_VAAPI OFF)
+endif()
+
 if(MSVC)
     target_compile_options(broremote PRIVATE /W4)
 else()
