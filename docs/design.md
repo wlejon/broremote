@@ -204,7 +204,7 @@ can be added beside it when the MF decoder needs one.
 ```cpp
 struct ServerConfig {
     std::string socket_name = "default";   // $XDG_RUNTIME_DIR/broremote/<name>.sock
-    std::vector<Codec> codecs = {Codec::H264}; // preference order; ones this build cannot encode are skipped
+    std::vector<Codec> codecs = {Codec::HEVC, Codec::H264}; // preference order; ones this build cannot encode are skipped
     uint32_t bitrate_kbps = 20000;
     uint32_t fps = 60;
     uint32_t max_frames_in_flight = 2;     // unacked frames per client before encoding pauses
@@ -378,7 +378,12 @@ holding imports across frames would pin host buffers the host may free.
 - *Sequence.* I and P only, no B-frames: an IDR, then predicted frames each
   referencing only the one before it (two reconstructed surfaces
   alternate), until the next forced keyframe. CBR at the configured bitrate
-  with a half-second HRD buffer. H.264: High (Main / Constrained Baseline
+  with a half-second HRD buffer and no filler (`disable_bit_stuffing`):
+  padding a quiet desktop up to the bitrate is wasted bandwidth, and on VCN 4
+  (encoder firmware ENC 1.24) an AV1 frame needing more than about 35 KB of
+  padding OBU hangs the encode ring. Mesa enables filler in CBR unless the
+  application turns it off; ffmpeg's VA-API encoders and RADV's Vulkan Video
+  leave it on. H.264: High (Main / Constrained Baseline
   when High is missing), `frame_num` and POC (type 0, 2 per frame) with
   8-bit wrap. HEVC Main: IDR_W_RADL then TRAIL_R, an explicit one-entry
   short-term RPS in each slice header, coding tools and block sizes from the
@@ -397,16 +402,16 @@ holding imports across frames would pin host buffers the host may free.
   decoding can start at any keyframe with nothing prepended.
 - *AV1* is implemented (profile 0, the same shape: slot 0 always holds the
   previous frame; sequence and frame headers packed, with the VA bit
-  offsets) but not reported unless `BROREMOTE_VAAPI_AV1=1`. AV1 cannot crop,
-  and radeonsi encodes the frame at its surface alignment (1366x770 as
-  1408x784, 1080 lines as 1082), keeping the visible size only in
-  `render_size`, which ffmpeg and dav1d do not apply: the decoded picture
-  would not be the stream's size. An opt-in run also hung the VCN ring once
-  (1080p, scanout dmabufs; the kernel reset the ring). Two radeonsi quirks
-  are handled: a temporal delimiter inside a packed header makes it fail to
-  parse the sequence header (and divide by zero in `vaEndPicture`), so the
-  encoder prepends the delimiter to each packet; and the sequence header
-  must carry `timing_info`.
+  offsets). It is offered but not the default (HEVC is: on a LAN, AV1 gains
+  little on desktop content, and radeonsi uses none of AV1's screen-content
+  tools). AV1 cannot crop, and VCN 4 encodes the frame at its surface
+  alignment (1366x770 as 1408x784, 1080 lines as 1082; a hardware limit),
+  keeping the visible size only in `render_size`, which ffmpeg and dav1d do
+  not apply: a viewer crops to the `StreamConfig` size. radeonsi's VA
+  frontend reads only the first OBU of a packed-header buffer, so a temporal
+  delimiter there hides the sequence header and the driver divides by zero
+  in `vaEndPicture`: the encoder prepends the delimiter to each packet
+  itself.
 
 **Media Foundation decoder (Windows).** The system's synchronous decoder
 MFT for the codec (`MFTEnumEx`, NV12 output): msmpeg2vdec for H.264, the

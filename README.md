@@ -20,7 +20,7 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 | Server (I/O + encode threads, ack window, keyframes, input, cursor) and Client | done, tested on Windows and Linux |
 | `Codec::Raw` (CPU RGBA, run-length + XOR-delta) and the codec factory | done |
 | `broremote proxy`, `serve-test`, `codecs`, `encode`, `record` | done |
-| VA-API encoder (Linux): H.264, HEVC; AV1 opt-in | done, tested on radeonsi |
+| VA-API encoder (Linux): HEVC (default), H.264, AV1 | done, tested on radeonsi |
 | Media Foundation decoder (Windows): H.264, HEVC, AV1, D3D11 or software | done |
 | `broremote-view` (SDL3): Windows decodes; Linux shows Raw only, so far | done |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | not yet |

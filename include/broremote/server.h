@@ -23,7 +23,7 @@ namespace broremote {
 
 struct ServerConfig {
     std::string socket_name = "default";        // the socket file is <runtime dir>/<name>.sock (stream.h)
-    std::vector<Codec> codecs = {Codec::H264};  // preference order; those this build cannot encode are skipped
+    std::vector<Codec> codecs = {Codec::HEVC, Codec::H264};  // preference order; those this build cannot encode are skipped
     uint32_t bitrate_kbps = 20000;
     uint32_t fps = 60;                          // a hint for the encoder and the viewer
     uint32_t max_frames_in_flight = 2;          // unacked frames per client before encoding pauses

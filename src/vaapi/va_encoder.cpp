@@ -17,18 +17,11 @@
 
 namespace broremote::vaapi {
 
-// AV1 is implemented but not reported unless $BROREMOTE_VAAPI_AV1=1: AV1 has
-// no cropping, and radeonsi encodes the frame at its surface alignment
-// (64x16; 1080 lines become 1082), keeping the visible size only as
-// render_size. ffmpeg/dav1d output the padded frame, so the decoded picture
-// would not be the stream's size. See docs/design.md.
+// AV1 has no cropping: radeonsi encodes the frame at its surface alignment
+// (64x16; 1080 lines become 1082) and keeps the visible size only as
+// render_size, so a decoder crops to the StreamConfig size. See docs/design.md.
 const std::vector<Codec>& supported_codecs() {
-    static const std::vector<Codec> codecs = [] {
-        std::vector<Codec> c{Codec::H264, Codec::HEVC};
-        const char* av1 = std::getenv("BROREMOTE_VAAPI_AV1");
-        if (av1 && !std::strcmp(av1, "1")) c.push_back(Codec::AV1);
-        return c;
-    }();
+    static const std::vector<Codec> codecs{Codec::H264, Codec::HEVC, Codec::AV1};
     return codecs;
 }
 
@@ -224,6 +217,10 @@ private:
         rc.bits_per_second = sp_.bitrate_bps;
         rc.target_percentage = 100;
         rc.window_size = 1000;
+        // No filler: padding a quiet desktop up to the bitrate is wasted
+        // bandwidth, and on VCN 4 firmware (ENC 1.24) an AV1 frame that needs
+        // more than about 35 KB of padding OBU hangs the encode ring.
+        rc.rc_flags.bits.disable_bit_stuffing = 1;
         VAEncMiscParameterHRD hrd{};
         // Half a second of buffer: room for a keyframe without letting the
         // rate controller run a long way ahead of the link.

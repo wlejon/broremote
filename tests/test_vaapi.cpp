@@ -127,7 +127,7 @@ void verify_stream(Codec codec, const std::vector<EncodedPacket>& pkts, const st
     oracle::write_file(path_for(name + ".probe"), concat(pkts, 0, std::min<size_t>(pkts.size(), 1)));
     CHECK(oracle::probe_size(path_for(name + ".probe"), codec, pw, ph));
     if (codec == Codec::AV1) {
-        // AV1 (opt-in, BROREMOTE_VAAPI_AV1=1) cannot crop: the frame may be
+        // AV1 cannot crop: the frame may be
         // padded, with the visible size in render_size (applied by decode()).
         CHECK(pw >= w && ph >= h);
         if (pw != w || ph != h) std::printf("   %s: AV1 frame %ux%u for a %ux%u picture\n", name.c_str(), pw, ph, w, h);
@@ -362,6 +362,8 @@ void test_latency(Codec codec) {
         CHECK(false);
         return;
     }
+    // 2560x1440 at 30 Mbps is also the AV1 ring-hang regression: with CBR
+    // filler on, its quiet frames need more padding than VCN 4 survives.
     for (auto [w, h, kbps] : {std::tuple<uint32_t, uint32_t, uint32_t>{1920, 1080, 20000}, {2560, 1440, 30000}}) {
         Latency lat;
         const std::string name = std::string(codec_name(codec)) + "-" + std::to_string(w) + "x" + std::to_string(h);
