@@ -51,6 +51,9 @@ public:
     // The picture's own buffers: picture parameters, packed headers, slice
     // or tile-group parameters.
     virtual bool add_picture(BufferList& bufs, const PictureParams& pic, std::string* err) = 0;
+    // Completes the coded data into the packet the stream carries (AV1: the
+    // temporal delimiter the driver does not write).
+    virtual void finish_packet(std::vector<uint8_t>& /*data*/) {}
 };
 
 // The codecs this backend implements (and so may report), in the factory's order.

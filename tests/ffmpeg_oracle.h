@@ -73,12 +73,16 @@ inline bool read_pictures(const std::string& cmd, size_t size, std::vector<std::
 inline bool decode(const std::string& path, broremote::Codec codec, uint32_t width, uint32_t height,
                    std::vector<std::vector<uint8_t>>& frames, std::string& log, bool luma_only = false) {
     std::string cmd = std::string("ffmpeg -hide_banner -nostdin -v error -f ") + demuxer(codec) + " -i '" + path + "'";
+    // The top-left width x height: a no-op for H.264/HEVC (their decoded
+    // size is the visible one); for AV1 it applies render_size, which ffmpeg
+    // does not.
+    const std::string crop = "crop=" + std::to_string(width) + ":" + std::to_string(height) + ":0:0";
     if (luma_only) {
         // yuv420p is the decoders' native output: no conversion, and Y comes first.
-        cmd += " -f rawvideo -pix_fmt yuv420p -";
+        cmd += " -vf " + crop + " -f rawvideo -pix_fmt yuv420p -";
     } else {
-        cmd += " -sws_flags bicubic+accurate_rnd+full_chroma_int"
-               " -vf scale=in_range=limited:in_color_matrix=bt709:out_range=full -f rawvideo -pix_fmt rgb24 -";
+        cmd += " -sws_flags bicubic+accurate_rnd+full_chroma_int -vf " + crop +
+               ",scale=in_range=limited:in_color_matrix=bt709:out_range=full -f rawvideo -pix_fmt rgb24 -";
     }
     const size_t size = luma_only ? size_t(width) * height + 2 * (size_t((width + 1) / 2) * ((height + 1) / 2))
                                   : size_t(width) * height * 3;

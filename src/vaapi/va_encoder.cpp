@@ -11,12 +11,24 @@
 #include "vaapi/va_vpp.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 
 namespace broremote::vaapi {
 
+// AV1 is implemented but not reported unless $BROREMOTE_VAAPI_AV1=1: AV1 has
+// no cropping, and radeonsi encodes the frame at its surface alignment
+// (64x16; 1080 lines become 1082), keeping the visible size only as
+// render_size. ffmpeg/dav1d output the padded frame, so the decoded picture
+// would not be the stream's size. See docs/design.md.
 const std::vector<Codec>& supported_codecs() {
-    static const std::vector<Codec> codecs{Codec::H264, Codec::HEVC};
+    static const std::vector<Codec> codecs = [] {
+        std::vector<Codec> c{Codec::H264, Codec::HEVC};
+        const char* av1 = std::getenv("BROREMOTE_VAAPI_AV1");
+        if (av1 && !std::strcmp(av1, "1")) c.push_back(Codec::AV1);
+        return c;
+    }();
     return codecs;
 }
 
@@ -31,10 +43,8 @@ std::vector<VAProfile> codec_profiles(Codec codec) {
 
 uint32_t codec_alignment(Codec codec) {
     switch (codec) {
-        case Codec::H264: return 16;
-        case Codec::HEVC: return 16;
-        case Codec::AV1: return 16;
-        default: return 16;
+        case Codec::AV1: return 64;  // whole superblocks
+        default: return 16;          // macroblocks; HEVC's minimum coding block is 8
     }
 }
 
@@ -127,8 +137,8 @@ private:
         const uint32_t align = codec_alignment(codec_);
         sp_.width = align_up(cfg_.width, 2);
         sp_.height = align_up(cfg_.height, 2);
-        sp_.coded_width = align_up(sp_.width, align);
-        sp_.coded_height = align_up(sp_.height, align);
+        sp_.coded_width = align_up(sp_.width, std::max(align, caps.align_width));
+        sp_.coded_height = align_up(sp_.height, std::max(align, caps.align_height));
         sp_.fps = cfg_.fps ? cfg_.fps : 60;
         sp_.bitrate_bps = uint32_t(std::min<uint64_t>(uint64_t(cfg_.bitrate_kbps) * 1000, 0xffffffffu));
         sp_.caps = caps;
@@ -141,6 +151,7 @@ private:
         switch (codec_) {
             case Codec::H264: impl_ = make_h264(sp_); break;
             case Codec::HEVC: impl_ = make_hevc(sp_); break;
+            case Codec::AV1: impl_ = make_av1(sp_); break;
             default: return fail(err, std::string(codec_name(codec_)) + " is not implemented by the VA-API backend");
         }
 
@@ -261,6 +272,7 @@ private:
         }
         vaUnmapBuffer(dpy, coded_);
         if (out.data.empty()) return fail(err, "the encoder produced no data");
+        impl_->finish_packet(out.data);
 
         out.keyframe = keyframe;
         if (keyframe) ++keyframe_count_;

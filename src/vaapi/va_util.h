@@ -43,8 +43,10 @@ public:
         return add_misc_raw(type, &payload, sizeof(T), err);
     }
     // A packed header: the parameter buffer and the data buffer. `bits` is
-    // the payload length in bits; `data` already carries emulation prevention.
-    bool add_packed(uint32_t packed_type, const std::vector<uint8_t>& data, size_t bits, std::string* err);
+    // the payload length in bits. `emulation`: the data already carries
+    // emulation prevention bytes (H.264/HEVC; AV1 has none).
+    bool add_packed(uint32_t packed_type, const std::vector<uint8_t>& data, size_t bits, std::string* err,
+                    bool emulation = true);
 
     // vaRenderPicture of every buffer added so far.
     bool render(std::string* err);

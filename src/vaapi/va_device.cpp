@@ -82,6 +82,27 @@ bool has_entrypoint(VADisplay dpy, VAProfile profile, VAEntrypoint ep) {
     return std::find(eps.begin(), eps.begin() + n, ep) != eps.begin() + n;
 }
 
+// The surface alignment the encoder needs (VASurfaceAttribAlignmentSize,
+// libva 2.17+), queried on a throwaway config; 16x16 when not reported.
+void surface_alignment(VADisplay dpy, VAProfile p, VAEntrypoint ep, CodecCaps& out) {
+    out.align_width = out.align_height = 16;
+    VAConfigAttrib a[2] = {{VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420}, {VAConfigAttribRateControl, VA_RC_CBR}};
+    VAConfigID cfg = VA_INVALID_ID;
+    if (vaCreateConfig(dpy, p, ep, a, 2, &cfg) != VA_STATUS_SUCCESS) return;
+    unsigned n = 0;
+    vaQuerySurfaceAttributes(dpy, cfg, nullptr, &n);
+    std::vector<VASurfaceAttrib> attrs(n);
+    if (n && vaQuerySurfaceAttributes(dpy, cfg, attrs.data(), &n) == VA_STATUS_SUCCESS) {
+        for (unsigned i = 0; i < n; ++i) {
+            if (attrs[i].type != VASurfaceAttribAlignmentSize) continue;
+            const uint32_t v = uint32_t(attrs[i].value.value.i);
+            out.align_width = std::max(16u, 1u << (v & 0xf));
+            out.align_height = std::max(16u, 1u << ((v >> 4) & 0xf));
+        }
+    }
+    vaDestroyConfig(dpy, cfg);
+}
+
 // The best usable profile/entrypoint of `codec` on `dpy`, if any: 4:2:0
 // 8-bit input and CBR rate control are required.
 bool probe_codec(VADisplay dpy, const std::vector<VAProfile>& profiles, Codec codec, CodecCaps& out) {
@@ -123,6 +144,7 @@ bool probe_codec(VADisplay dpy, const std::vector<VAProfile>& profiles, Codec co
             out.av1_features = attr(VAConfigAttribEncAV1);
             out.av1_ext1 = attr(VAConfigAttribEncAV1Ext1);
             out.av1_ext2 = attr(VAConfigAttribEncAV1Ext2);
+            surface_alignment(dpy, p, ep, out);
             return true;
         }
     }

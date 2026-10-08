@@ -125,8 +125,15 @@ void verify_stream(Codec codec, const std::vector<EncodedPacket>& pkts, const st
     uint32_t pw = 0, ph = 0;
     oracle::write_file(path_for(name + ".probe"), concat(pkts, 0, std::min<size_t>(pkts.size(), 1)));
     CHECK(oracle::probe_size(path_for(name + ".probe"), codec, pw, ph));
-    CHECK_EQ(pw, w);
-    CHECK_EQ(ph, h);
+    if (codec == Codec::AV1) {
+        // AV1 (opt-in, BROREMOTE_VAAPI_AV1=1) cannot crop: the frame may be
+        // padded, with the visible size in render_size (applied by decode()).
+        CHECK(pw >= w && ph >= h);
+        if (pw != w || ph != h) std::printf("   %s: AV1 frame %ux%u for a %ux%u picture\n", name.c_str(), pw, ph, w, h);
+    } else {
+        CHECK_EQ(pw, w);
+        CHECK_EQ(ph, h);
+    }
     const Quality q = verify_range(codec, pkts, source, 0, pkts.size(), w, h, name);
     std::printf("   %s: %zu pictures decoded; PSNR luma min %.2f mean %.2f dB; RGB min %.2f mean %.2f dB "
                 "(uncoded 4:2:0 ceiling %.2f); max channel bias %.2f\n",

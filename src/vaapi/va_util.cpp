@@ -25,11 +25,12 @@ bool BufferList::add_misc_raw(VAEncMiscParameterType type, const void* payload, 
     return add(VAEncMiscParameterBufferType, buf.data(), buf.size(), err);
 }
 
-bool BufferList::add_packed(uint32_t packed_type, const std::vector<uint8_t>& data, size_t bits, std::string* err) {
+bool BufferList::add_packed(uint32_t packed_type, const std::vector<uint8_t>& data, size_t bits, std::string* err,
+                            bool emulation) {
     VAEncPackedHeaderParameterBuffer p{};
     p.type = packed_type;
     p.bit_length = uint32_t(bits);
-    p.has_emulation_bytes = 1;
+    p.has_emulation_bytes = emulation ? 1 : 0;
     return add(VAEncPackedHeaderParameterBufferType, p, err) &&
            add(VAEncPackedHeaderDataBufferType, data.data(), data.size(), err);
 }
