@@ -222,9 +222,15 @@ private:
         // more than about 35 KB of padding OBU hangs the encode ring.
         rc.rc_flags.bits.disable_bit_stuffing = 1;
         VAEncMiscParameterHRD hrd{};
-        // Half a second of buffer: room for a keyframe without letting the
-        // rate controller run a long way ahead of the link.
-        hrd.buffer_size = sp_.bitrate_bps / 2;
+        // 50 ms of buffer (three frames at 60 fps): what a frame may borrow
+        // from the ones after it. A big change (a window opening, a scene
+        // switch) is one packet that must cross the link before it can be
+        // shown, so the buffer bounds that spike: with half a second,
+        // desktop-like content at 20 Mbit/s made packets of up to 450 kB
+        // that took 4-5 ms to arrive; with 50 ms they stay near 110 kB
+        // (1.5 ms), mean latency unchanged, at the cost of a softer first
+        // frame after the change that sharpens over the next few.
+        hrd.buffer_size = uint32_t(uint64_t(sp_.bitrate_bps) * 50 / 1000);
         hrd.initial_buffer_fullness = hrd.buffer_size / 2;
         VAEncMiscParameterFrameRate fr{};
         fr.framerate = sp_.fps;
