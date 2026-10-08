@@ -78,7 +78,7 @@ void test_duplicate_and_codecs() {
     c.reset();
     // A codec list with nothing this build can encode.
     std::vector<Codec> missing;
-    const auto have = available_encoders();
+    const auto have = brovideo::codecs(brovideo::Direction::Encode);
     for (Codec k : {Codec::H264, Codec::HEVC, Codec::AV1}) {
         if (std::find(have.begin(), have.end(), k) == have.end()) missing.push_back(k);
     }

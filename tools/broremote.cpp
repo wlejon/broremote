@@ -274,7 +274,8 @@ int cmd_encode(int argc, char** argv) {
         }
     }
     std::string err;
-    auto enc = create_encoder(codec, ec, &err);
+    ec.codec = codec;
+    auto enc = brovideo::create_encoder(ec, &err);
     if (!enc) {
         std::fprintf(stderr, "broremote encode: %s\n", err.c_str());
         return 1;
@@ -342,18 +343,23 @@ int cmd_encode(int argc, char** argv) {
 }
 
 int cmd_codecs() {
-    std::printf("encode:");
-    for (Codec c : available_encoders()) std::printf(" %s", codec_name(c));
-    std::printf("\ndecode:");
-    const std::vector<Codec> decoders = available_decoders();
-    for (Codec c : decoders) std::printf(" %s", codec_name(c));
-    std::printf("\n");
-    // How each real codec decodes here, or why it does not.
-    for (Codec c : {Codec::H264, Codec::HEVC, Codec::AV1}) {
-        std::string err;
-        auto d = create_decoder(c, &err);
-        const std::string what = d ? d->describe() : err;
-        std::printf("  %s: %s\n", codec_name(c), what.empty() ? "available" : what.c_str());
+    using brovideo::Direction;
+    for (Direction d : {Direction::Encode, Direction::Decode}) {
+        std::printf("%s:", d == Direction::Encode ? "encode" : "decode");
+        for (Codec c : brovideo::codecs(d)) std::printf(" %s", codec_name(c));
+        std::printf("\n");
+        // What does each real codec here (brovideo's probe), or why nothing does.
+        for (Codec c : {Codec::H264, Codec::HEVC, Codec::AV1}) {
+            bool any = false;
+            for (const brovideo::Capability& cap : brovideo::capabilities()) {
+                if (cap.codec != c || cap.direction != d) continue;
+                any = true;
+                std::printf("  %s: %s, %s%s%s\n", codec_name(c), brovideo::backend_name(cap.backend),
+                            cap.hardware ? "hardware" : "software", cap.device.empty() ? "" : ", ",
+                            cap.device.c_str());
+            }
+            if (!any) std::printf("  %s: %s\n", codec_name(c), brovideo::unavailable_reason(c, d).c_str());
+        }
     }
     return 0;
 }

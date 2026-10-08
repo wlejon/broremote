@@ -11,7 +11,7 @@ std::unique_ptr<Server> Server::create(const ServerConfig& cfg, std::string* err
     impl->cfg = cfg;
     if (impl->cfg.max_frames_in_flight == 0) impl->cfg.max_frames_in_flight = 1;
     if (impl->cfg.fps == 0) impl->cfg.fps = 60;
-    const std::vector<Codec> available = available_encoders();
+    const std::vector<Codec> available = brovideo::codecs(brovideo::Direction::Encode);
     for (Codec c : cfg.codecs) {
         const bool can = std::find(available.begin(), available.end(), c) != available.end();
         const bool dup = std::find(impl->server_codecs.begin(), impl->server_codecs.end(), c) !=

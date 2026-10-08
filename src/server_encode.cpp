@@ -46,11 +46,17 @@ void Server::Impl::encode_loop() {
         bool ok = true;
         if (reconfigure) {
             EncoderConfig ec;
+            ec.codec = codec;
             ec.width = f.width;
             ec.height = f.height;
             ec.fps = cfg.fps;
             ec.bitrate_kbps = kbps;
-            encoder = create_encoder(codec, ec, &err);
+            // A new size or bitrate in the same codec reconfigures the
+            // encoder in place (the VA-API one keeps its device and
+            // context); a new codec, or a backend that refuses, gets a new one.
+            if (!encoder || enc_codec != codec || !encoder->reconfigure(ec, nullptr)) {
+                encoder = brovideo::create_encoder(ec, &err);
+            }
             ok = encoder != nullptr;
             enc_codec = codec;
             enc_kbps = kbps;

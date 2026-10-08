@@ -148,7 +148,7 @@ void Session::connect_thread(SessionOptions options) {
     co.name = options.client_name;
     // Probing the decoders (Media Foundation decodes a keyframe of each
     // codec once) overlaps with ssh starting up.
-    const std::vector<Codec> decoders = available_decoders();
+    const std::vector<Codec> decoders = brovideo::codecs(brovideo::Direction::Decode);
     if (options.negotiate) co.codecs = decoders;
 
     ClientHandlers h;
@@ -279,7 +279,9 @@ void Session::decode_one(Item& item, Client& client) {
         config_ = item.config;
         if (!decoder_ || decoder_codec_ != config_.codec) {
             decoder_.reset();
-            decoder_ = create_decoder(config_.codec, &err);
+            DecoderConfig dc;
+            dc.codec = config_.codec;  // hardware where it works, CPU pictures ($BROVIDEO_HARDWARE=0: software)
+            decoder_ = brovideo::create_decoder(dc, &err);
             if (!decoder_) {
                 set_status([&](SessionStatus& s) {
                     s.failed = true;

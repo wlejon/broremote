@@ -170,7 +170,7 @@ void test_proxy_relay() {
 
 void test_serve_test_unavailable_codec() {
     check::phase("serve-test: an unavailable codec exits nonzero");
-    const auto have = available_encoders();
+    const auto have = brovideo::codecs(brovideo::Direction::Encode);
     const char* missing = nullptr;
     for (Codec c : {Codec::AV1, Codec::HEVC, Codec::H264}) {
         if (std::find(have.begin(), have.end(), c) == have.end()) missing = codec_name(c);

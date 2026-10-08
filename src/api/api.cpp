@@ -260,7 +260,7 @@ void installRemote() {
     remote.def("status", 0, [](Value, std::span<const Value>) -> Value { return statusObject(); });
 
     // codecs() -> what this machine can encode, in the library's order.
-    remote.def("codecs", 0, [](Value, std::span<const Value>) -> Value { return codecList(available_encoders()); });
+    remote.def("codecs", 0, [](Value, std::span<const Value>) -> Value { return codecList(brovideo::codecs(brovideo::Direction::Encode)); });
 
     remote.def("on", 2, addListener);
     remote.def("off", 2, removeListener);

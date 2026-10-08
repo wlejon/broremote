@@ -20,30 +20,17 @@ endfunction()
 
 broremote_test(test_wire)
 broremote_test(test_server)
-# The VA-API encoder against ffmpeg (skipped, exit 77, without a VA encoder).
-# GBM supplies the dmabuf frames.
-if(BROREMOTE_WITH_VAAPI)
-    pkg_check_modules(BROREMOTE_GBM IMPORTED_TARGET gbm)
-    if(BROREMOTE_GBM_FOUND)
-        if(TARGET broremote_cli)
-            broremote_test(test_vaapi ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp
-                           ARGS $<TARGET_FILE:broremote_cli> TIMEOUT 900)
-            add_dependencies(test_vaapi broremote_cli)
-        else()
-            broremote_test(test_vaapi ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp TIMEOUT 900)
-        endif()
-        target_link_libraries(test_vaapi PRIVATE PkgConfig::BROREMOTE_GBM PkgConfig::BROREMOTE_VA)
-        set_tests_properties(test_vaapi PROPERTIES SKIP_RETURN_CODE 77)
+# Remoting through a hardware encoder, against ffmpeg (Linux; skipped, exit
+# 77, without one). The encoders themselves are tested in brovideo.
+if(UNIX AND NOT APPLE)
+    if(TARGET broremote_cli)
+        broremote_test(test_hw_stream ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp
+                       ARGS $<TARGET_FILE:broremote_cli> TIMEOUT 900)
+        add_dependencies(test_hw_stream broremote_cli)
     else()
-        message(STATUS "broremote: test_vaapi not built (gbm not found)")
+        broremote_test(test_hw_stream ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp TIMEOUT 900)
     endif()
-endif()
-
-# The Media Foundation decoder: fixtures made with ffmpeg when it is on PATH,
-# and the VA-API encoder's recorded output in tests/fixtures.
-if(BROREMOTE_WITH_MF)
-    broremote_test(test_mf ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp TIMEOUT 600)
-    target_compile_definitions(test_mf PRIVATE BROREMOTE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+    set_tests_properties(test_hw_stream PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # broremote-view's input path through the real Viewer (SDL's offscreen driver).

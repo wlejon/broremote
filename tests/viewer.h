@@ -38,7 +38,9 @@ public:
             std::lock_guard<std::mutex> lk(m_);
             configs.push_back(sc);
             std::string err;
-            decoder_ = create_decoder(sc.codec, &err);
+            DecoderConfig dc;
+            dc.codec = sc.codec;
+            decoder_ = brovideo::create_decoder(dc, &err);
             if (!decoder_) decode_errors.push_back(err);
         };
         h.on_video = [this](const VideoPacket& v) {

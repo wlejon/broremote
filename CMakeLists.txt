@@ -37,14 +37,12 @@ endif()
 find_package(Threads REQUIRED)
 
 # ---- library -------------------------------------------------------------------
-# The core (wire, protocol, streams, server, client, the built-in Raw codec)
-# needs nothing beyond the platform. Codec backends (VA-API, Media
-# Foundation) register in src/codec_factory.cpp behind their own options.
+# The core (wire, protocol, streams, server, client) needs nothing beyond the
+# platform and brovideo, which holds every codec (Raw, VA-API, Media
+# Foundation) and decides at run time which of them this machine has.
 set(BROREMOTE_SOURCES
     src/wire.cpp
     src/protocol.cpp
-    src/codec_factory.cpp
-    src/raw_codec.cpp
     src/paths_common.cpp
     src/server.cpp
     src/server_io.cpp
@@ -87,62 +85,24 @@ if(WIN32)
     target_link_libraries(broremote PRIVATE ws2_32 advapi32)
     target_compile_definitions(broremote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
-# ---- VA-API encoder (Linux) ------------------------------------------------------
-# Auto: on when libva, libva-drm and libdrm (for the fourcc header) are found.
-if(UNIX AND NOT APPLE)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(BROREMOTE_VA IMPORTED_TARGET GLOBAL libva libva-drm libdrm)
+# ---- brovideo: the codecs ----------------------------------------------------------
+# An existing brovideo target (bro builds it), else -DBROVIDEO_DIR, else a
+# checkout beside this one (../brovideo). Its backends are its own options
+# (BROVIDEO_WITH_VAAPI, BROVIDEO_WITH_MF); on Linux it needs ../brodmabuf.
+if(NOT TARGET brovideo)
+    if(DEFINED BROVIDEO_DIR AND EXISTS "${BROVIDEO_DIR}/CMakeLists.txt")
+        # Explicit BROVIDEO_DIR supplied
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brovideo/CMakeLists.txt")
+        set(BROVIDEO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brovideo" CACHE PATH "brovideo source tree")
     endif()
-    if(BROREMOTE_VA_FOUND)
-        set(_broremote_vaapi_default ON)
-    else()
-        set(_broremote_vaapi_default OFF)
+    if(NOT BROVIDEO_DIR OR NOT EXISTS "${BROVIDEO_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+            "brovideo not found: check it out beside this repository (../brovideo) or pass -DBROVIDEO_DIR=<path>.")
     endif()
-    option(BROREMOTE_WITH_VAAPI "Build the VA-API encoder" ${_broremote_vaapi_default})
-    if(BROREMOTE_WITH_VAAPI AND NOT BROREMOTE_VA_FOUND)
-        message(FATAL_ERROR "BROREMOTE_WITH_VAAPI is ON but libva, libva-drm and libdrm were not all found")
-    endif()
-    if(BROREMOTE_WITH_VAAPI)
-        message(STATUS "broremote: VA-API encoder enabled (libva ${BROREMOTE_VA_libva_VERSION})")
-        target_sources(broremote PRIVATE
-            src/vaapi/va_util.cpp
-            src/vaapi/va_device.cpp
-            src/vaapi/va_source.cpp
-            src/vaapi/va_vpp.cpp
-            src/vaapi/va_encoder.cpp
-            src/vaapi/va_h264.cpp
-            src/vaapi/va_hevc.cpp
-            src/vaapi/va_av1.cpp
-        )
-        target_compile_definitions(broremote PRIVATE BROREMOTE_HAVE_VAAPI)
-        target_link_libraries(broremote PRIVATE PkgConfig::BROREMOTE_VA)
-    else()
-        message(STATUS "broremote: VA-API encoder disabled (libva, libva-drm and libdrm not all found)")
-    endif()
-else()
-    set(BROREMOTE_WITH_VAAPI OFF)
+    set(BROVIDEO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${BROVIDEO_DIR}" "${CMAKE_BINARY_DIR}/brovideo" EXCLUDE_FROM_ALL)
 endif()
-
-# ---- Media Foundation decoder (Windows) ------------------------------------------
-# Everything it needs is in the Windows SDK; which codecs actually decode is
-# probed at run time (src/mf/mf_probe.cpp).
-if(WIN32)
-    option(BROREMOTE_WITH_MF "Build the Media Foundation decoder" ON)
-else()
-    set(BROREMOTE_WITH_MF OFF)
-endif()
-if(BROREMOTE_WITH_MF)
-    message(STATUS "broremote: Media Foundation decoder enabled")
-    target_sources(broremote PRIVATE
-        src/mf/mf_util.cpp
-        src/mf/mf_bitstream.cpp
-        src/mf/mf_decoder.cpp
-        src/mf/mf_probe.cpp
-    )
-    target_compile_definitions(broremote PRIVATE BROREMOTE_HAVE_MF)
-    target_link_libraries(broremote PRIVATE mfplat mfuuid d3d11 ole32 oleaut32)
-endif()
+target_link_libraries(broremote PUBLIC brovideo::brovideo)
 
 if(MSVC)
     target_compile_options(broremote PRIVATE /W4)

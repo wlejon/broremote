@@ -1,5 +1,6 @@
-// Wire primitives, every protocol message, and the Raw codec: round trips and
-// hostile input (huge lengths and counts, truncated bodies, bad values).
+// Wire primitives and every protocol message: round trips and hostile input
+// (huge lengths and counts, truncated bodies, bad values). The Raw codec's
+// own tests are brovideo's (tests/test_raw.cpp there).
 #include "broremote/codec.h"
 #include "broremote/protocol.h"
 #include "broremote/wire.h"
@@ -427,126 +428,6 @@ void test_fuzz() {
     CHECK(true);
 }
 
-std::vector<uint8_t> pattern(uint32_t w, uint32_t h, uint32_t seed) {
-    std::vector<uint8_t> px(size_t(w) * h * 4);
-    for (uint32_t y = 0; y < h; ++y) {
-        for (uint32_t x = 0; x < w; ++x) {
-            uint8_t* p = &px[(size_t(y) * w + x) * 4];
-            // Flat areas (runs) and noisy ones (literals).
-            const bool flat = ((x / 8) + (y / 8) + seed) % 3 == 0;
-            p[0] = flat ? 10 : uint8_t(x * 7 + seed);
-            p[1] = flat ? 20 : uint8_t(y * 13 + seed * 3);
-            p[2] = flat ? 30 : uint8_t((x ^ y) + seed);
-            p[3] = 255;
-        }
-    }
-    return px;
-}
-
-void test_raw_codec() {
-    check::phase("raw codec");
-    std::string err;
-    const uint32_t w = 61, h = 37;  // odd sizes
-    auto enc = create_encoder(Codec::Raw, {w, h, 60, 1000}, &err);
-    auto dec = create_decoder(Codec::Raw, &err);
-    CHECK(enc && dec);
-    if (!enc || !dec) return;
-    for (uint32_t i = 0; i < 6; ++i) {
-        // A padded stride on odd frames.
-        const uint32_t stride = (i & 1) ? w * 4 + 12 : 0;
-        std::vector<uint8_t> src = pattern(w, h, i < 3 ? 0 : i);  // frames 1, 2 repeat frame 0
-        std::vector<uint8_t> padded;
-        const uint8_t* cpu = src.data();
-        if (stride) {
-            padded.assign(size_t(stride) * h, 0xEE);
-            for (uint32_t y = 0; y < h; ++y) std::memcpy(&padded[size_t(y) * stride], &src[size_t(y) * w * 4], w * 4);
-            cpu = padded.data();
-        }
-        Frame f;
-        f.width = w;
-        f.height = h;
-        f.cpu = cpu;
-        f.cpu_stride = stride;
-        f.pts_ns = i;
-        int released = 0;
-        EncodedPacket pkt;
-        CHECK(enc->encode(f, i == 4, [&] { ++released; }, pkt, &err));
-        CHECK_EQ(released, 1);
-        CHECK_EQ(pkt.keyframe, i == 0 || i == 4);
-        CHECK_EQ(pkt.pts_ns, int64_t(i));
-        if (i == 1 || i == 2) CHECK(pkt.data.size() < 16);  // an unchanged frame is a single run
-        DecodedFrame out;
-        CHECK(dec->decode(pkt.data, out, &err));
-        CHECK(out.ready);
-        CHECK_EQ(out.width, w);
-        CHECK_EQ(out.height, h);
-        CHECK_EQ(out.stride, w * 4);
-        CHECK(out.data == src);
-    }
-    // Wrong size and non-CPU frames fail, still releasing exactly once.
-    {
-        std::vector<uint8_t> px(size_t(w + 1) * h * 4);
-        Frame f;
-        f.width = w + 1;
-        f.height = h;
-        f.cpu = px.data();
-        int released = 0;
-        EncodedPacket pkt;
-        CHECK(!enc->encode(f, false, [&] { ++released; }, pkt, &err));
-        CHECK_EQ(released, 1);
-        Frame d;
-        d.width = w;
-        d.height = h;
-        d.plane_count = 1;
-        CHECK(!enc->encode(d, false, [&] { ++released; }, pkt, &err));
-        CHECK_EQ(released, 2);
-    }
-    check::phase("raw codec hostile");
-    {
-        auto d2 = create_decoder(Codec::Raw, &err);
-        DecodedFrame out;
-        // A delta frame with no reference: lost sync.
-        std::vector<uint8_t> delta = {1, 2, 2, 0x07, 0, 0, 0, 0};
-        CHECK(!d2->decode(delta, out, &err));
-        // Truncated, oversized and overrunning packets.
-        CHECK(!d2->decode(std::vector<uint8_t>{}, out, &err));
-        CHECK(!d2->decode(std::vector<uint8_t>{0, 2}, out, &err));
-        std::vector<uint8_t> huge = {0, 0x80, 0x80, 0x04, 0x80, 0x80, 0x04};  // 65536 x 65536
-        CHECK(!d2->decode(huge, out, &err));
-        std::vector<uint8_t> overrun = {0, 2, 2, 0x0F, 1, 2, 3, 4};  // a run of 8 into 4 pixels
-        CHECK(!d2->decode(overrun, out, &err));
-        std::vector<uint8_t> shortlit = {0, 2, 2, 0x06, 1, 2, 3};  // a literal of 4 pixels, 3 bytes
-        CHECK(!d2->decode(shortlit, out, &err));
-        std::vector<uint8_t> ok = {0, 2, 2, 0x07, 9, 8, 7, 6};
-        CHECK(d2->decode(ok, out, &err));
-        CHECK_EQ(out.data.size(), size_t(16));
-        CHECK_EQ(out.data[15], uint8_t(6));
-        // After an error, a delta frame must not decode against the old picture.
-        CHECK(!d2->decode(overrun, out, &err));
-        CHECK(!d2->decode(delta, out, &err));
-        std::mt19937 rng(99);
-        for (int i = 0; i < 5000; ++i) {
-            std::vector<uint8_t> junk(size_t(rng() % 32));
-            for (auto& b : junk) b = uint8_t(rng());
-            if (!junk.empty()) junk[0] &= 1;
-            if (junk.size() > 2) junk[1] &= 0x3F, junk[2] &= 0x3F;
-            d2->decode(junk, out, &err);
-        }
-        CHECK(true);
-    }
-    check::phase("factory");
-    {
-        auto encs = available_encoders();
-        auto decs = available_decoders();
-        CHECK(!encs.empty() && encs.front() == Codec::Raw);
-        CHECK(!decs.empty() && decs.front() == Codec::Raw);
-        CHECK(!create_encoder(Codec::Raw, {0, 10, 60, 1}, &err));
-        CHECK(parse_codec("h265") == Codec::HEVC);
-        CHECK(parse_codec("raw") == Codec::Raw);
-        CHECK(!parse_codec("vp9"));
-    }
-}
-
 }  // namespace
 
 int main() {
@@ -555,6 +436,5 @@ int main() {
     test_splitter();
     test_messages();
     test_fuzz();
-    test_raw_codec();
     return check::finish();
 }
