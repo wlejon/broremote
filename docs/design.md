@@ -15,9 +15,14 @@ its own against the interfaces here.
   scanout, so the shell and every client window are in it. Streaming
   individual Wayland windows is a different product and is out of scope.
 - **No crypto, no network listener.** The server listens only on a local
-  socket. A remote viewer reaches it through `ssh host broremote proxy`, which
-  relays bytes to that socket without reading them, exactly as bromux does.
+  address (an AF_UNIX socket on Linux and macOS, a named pipe on Windows). A
+  remote viewer reaches it through `ssh host broremote proxy`, which relays
+  bytes to that address without reading them, exactly as bromux does.
   Authentication and encryption are ssh's.
+- **Not a transport library.** The local listener and connector, their peer
+  checks, the event loop, spawned and stdio streams, the proxy relay, the
+  framing and the lane grants are brolink's (../brolink), shared with bromux.
+  broremote decides what goes on which connection.
 - **No GPL.** Codecs are reached through platform APIs (VA-API on Linux, Media
   Foundation on Windows), never through ffmpeg/x264. ffmpeg/ffprobe are used
   only by tests, as an oracle, when present.
@@ -30,15 +35,16 @@ its own against the interfaces here.
 
 ```
 include/broremote/
-  wire.h        primitives: little-endian ints, LEB128 varints, bounds-checked Reader
+  wire.h        brolink's framing and primitives, with broremote's 64 MiB limit
   protocol.h    message types and their encode/decode
-  stream.h      blocking byte streams: local socket, child-process stdio (ssh), stdio
+  stream.h      brolink's blocking byte streams (local connection, child-process
+                stdio for ssh, stdio) under broremote's socket names, and the proxy
   frame.h       brovideo's Frame, Packet (EncodedPacket), Picture (DecodedFrame); InputEvent, CursorState
   codec.h       brovideo's Codec, Encoder, Decoder and their configs; codec_known() for the wire
   server.h      Server: the host submits frames and drains input
   client.h      Client: connects, receives packets, sends input
   api.h         the JavaScript binding's public header (forwards to src/api)
-src/            implementation; src/posix, src/win for platform pieces
+src/            implementation (no platform pieces: those are brolink's)
 src/api/        broremote_api, the bronze JavaScript binding (bro.remote)
 tools/          broremote (CLI: proxy, serve-test, codecs, encode, record),
                 connect (the --ssh/--socket target, shared), test_pattern,
@@ -63,7 +69,8 @@ are honest on a box without the hardware.
 Dependencies resolve by the ecosystem convention (existing target, then
 `../<name>`, then `third_party/<name>`). brovideo is required: an existing
 `brovideo` target, else `-DBROVIDEO_DIR`, else `../brovideo` (which on Linux
-needs `../brodmabuf` in turn). SDL3 for
+needs `../brodmabuf` in turn). So is brolink: an existing `brolink` target,
+else `-DBROLINK_DIR`, else `../brolink`. SDL3 for
 the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`; on
 Windows, when no vcpkg toolchain file points at it, the vcpkg trees at
 `$VCPKG_ROOT`, `../vcpkg` and `../../vcpkg` (triplet x64-windows) are tried,
@@ -84,7 +91,7 @@ with bro's settings, so nothing mixes there.
 
 ## Wire format
 
-Same shape as bromux's (docs/protocol.md there):
+brolink's framing, the same as bromux's (docs/protocol.md there):
 
 ```
 message := u32 length   -- little endian; bytes that follow (type + body), >= 2
@@ -106,11 +113,25 @@ decoder ignores trailing bytes) or add message types (unknown types are
 ignored by clients, answered with `Error(UnknownMessage)` by servers). Anything
 else bumps the major. The full catalogue lives in docs/protocol.md.
 
+### Lanes (1.2)
+
+A session is a bundle of connections. The control connection says `Hello`
+and its `Welcome` carries a grant (a session id and a 32-byte token from the
+OS CSPRNG, brolink's `lanes::Registry`). A further connection opens with
+`Join{session, token, "input"}` and becomes the session's input lane, which
+carries `Input` and `Ping`. The point is that input never waits behind video:
+a keyframe queued on the control connection holds up everything behind it in
+the server's queue, the proxy and the ssh channel, and a lane is a separate
+connection all the way (over ssh, a second ssh). The session ends with the
+control connection; a lane that fails or closes only sends input back to the
+control connection.
+
 ### Server to client
 
 | Message | Body |
 |---|---|
-| `Welcome` | major, minor, server name |
+| `Welcome` | major, minor, server name; 1.2: the lane grant |
+| `Joined` | (empty; 1.2) the `Join` was accepted |
 | `StreamConfig` | stream id (varint, increments on every reconfigure), codec, width, height, fps hint |
 | `Video` | stream id, frame id (varint), pts ns (svarint), flags (keyframe), bitstream bytes |
 | `Cursor` | visible, x, y in stream pixels, hotspot, shape name (str); image later |
@@ -130,6 +151,7 @@ sets in-band on every keyframe, so a decoder needs nothing but the packets.
 | `RequestKeyframe` | (empty) — the decoder lost sync |
 | `Input` | one `InputEvent` (below) |
 | `SetCodec` | preferred codec list, max bitrate kbps (optional; the server picks) |
+| `Join` | (1.2) session id, token, lane name: the first message of a lane connection |
 
 A viewer must ack frames it fails to decode too (and then request a
 keyframe): an unacked frame holds the ack window shut, and with encoding
@@ -238,15 +260,22 @@ yet had a keyframe of the current stream is sent no predicted frames. Frame
 ids count every packet from 1 across streams. If the encoder cannot be made
 or fails, every client gets `Error(EncoderFailed)` and is closed.
 
-The socket is created mode 0600 in a 0700 directory and the peer's uid is
-checked (`SO_PEERCRED`) on both sides, as in bromux. Without
+The I/O thread is brolink's event loop. Each client's outgoing messages
+are handed to the loop one at a time, so a `Pong` can still go ahead of
+queued video, and `FrameSent` is sent once a `Video` has wholly left for the
+transport. Lane connections (above) are clients of the same loop whose
+messages go to the session's input queue; `Stats` counts the lanes joined
+and the inputs that came on them.
+
+The address is brolink's `local_address("broremote", name)`, with bromux's
+safeguards. On Linux the socket is created mode 0600 in a 0700 directory and
+the peer's uid is checked (`SO_PEERCRED`) on both sides; without
 `$XDG_RUNTIME_DIR` the directory is `/tmp/broremote-<uid>/`. On Windows (tests
-and development only; the real host is bro on Linux) the socket is AF_UNIX
-too, in `%LOCALAPPDATA%\broremote\`, inside the user's profile, and the client
-checks the server process runs as the same user
-(`SIO_AF_UNIX_GETPEERPID` + the token's SID). A blocked `recv()` on a Windows
-AF_UNIX socket is not reliably woken when the peer closes, so the Windows
-client stream waits in `WSAPoll` with a short timeout instead.
+and development only; the real host is bro on Linux) it is a named pipe,
+`\\.\pipe\broremote-<SID>-<name>`, with a DACL granting only the user,
+remote clients refused, and both ends checking the other process runs as the
+same user. A second server on a live name fails ("a server is already
+listening"); a stale socket file is replaced.
 
 ### Client (viewer side)
 
@@ -256,6 +285,12 @@ struct ClientOptions {
     std::vector<Codec> codecs;          // sent as SetCodec after the handshake when not empty
     uint32_t max_bitrate_kbps = 0;
     uint32_t connect_timeout_ms = 10000;
+    // 1.2: opens a second connection the way the first was opened (a local
+    // connection, or another ssh + proxy) to carry input. Called at the
+    // start of connect(), so both connections come up together; it joins
+    // once Welcome grants the session. Empty, an older server or a lane
+    // that fails: input goes on the control connection.
+    std::function<std::unique_ptr<Stream>(std::string* err)> open_input_lane;
 };
 struct ClientHandlers {                 // run on the client's reader thread, in message order
     std::function<void(const StreamConfig&)> on_config;
@@ -275,6 +310,8 @@ public:
     void request_keyframe();
     void send_input(const InputEvent&);
     void set_codecs(const std::vector<Codec>&, uint32_t max_bitrate_kbps = 0);
+    bool input_lane() const;            // input is going on its own lane
+    std::string input_lane_error() const;  // why not, when one was asked for
     bool connected() const;
     void close();
 };
@@ -330,13 +367,15 @@ NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
 ## Tools
 
 - `broremote proxy [--socket NAME] [--pty]`: relays stdin/stdout to the
-  local server socket. This is what `ssh host broremote proxy` runs. With
-  `--pty` (for `ssh -tt`) it makes its terminal raw and writes a ready
+  local server address (brolink's relay). This is what `ssh host broremote
+  proxy` runs, once per connection (a viewer with an input lane runs two).
+  With `--pty` (for `ssh -tt`) it makes its terminal raw and writes a ready
   marker before any protocol byte (`run_proxy` in stream.h).
 - `broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N]
   [--bitrate KBPS] [--seconds N] [--window N] [--content scroll|desktop]
   [--latency]`: a server fed a moving test pattern (CPU frames), so a viewer
-  can be tested with no bro. `--latency` answers each key or button press
+  can be tested with no bro. On exit it prints how many input lanes joined
+  and how many inputs arrived on them. `--latency` answers each key or button press
   at once (it looks for input every millisecond) with a frame whose second
   block row counts the presses, for `broremote-view --latency-test`;
   `--content desktop` is a still picture whose counter changes every frame
@@ -366,6 +405,14 @@ NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
 `--ssh-command` the proxy gets `--socket NAME`). BatchMode because ssh runs
 with no console to prompt on: a password or host-key question fails at once
 with its reason instead of hanging. `--socket NAME` alone connects locally.
+
+Input lane (protocol 1.2): the viewer opens its input lane the same way as
+the control connection, so with `--ssh` it runs a second ssh (same program,
+options and command) and locally it makes a second connection; both start
+together, so the lane costs no extra connect time. Stderr says "input on
+its own lane", or why not (an older server, the second ssh failing); input
+then goes on the control connection as before. `--no-input-lane` turns it
+off.
 
 Which ssh: `--ssh-program`, else `$BROREMOTE_SSH`, else on Windows the
 system's own OpenSSH (`%SystemRoot%\System32\OpenSSH\ssh.exe`) when it is
@@ -537,6 +584,14 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
 - Protocol 1.1 timing: Ping / Pong, every Video's timing inside the Pongs
   around it, FrameSent per frame in order, none to a 1.0 client, and the
   window-wait count (tests/test_server.cpp, tests/test_wire.cpp).
+- Protocol 1.2 lanes: the Welcome grant and Join round-trip; a Client with
+  an opener sends its input on the lane, one without or with a failing
+  opener on the control connection; every refusal (wrong token, unknown
+  lane, no such session, a lane joined twice, Join after Hello); Ping and
+  unknown messages on a lane; the control connection closing ends the lane
+  (tests/test_server.cpp, tests/test_wire.cpp); and the lane through a
+  second `broremote proxy` (tests/test_proxy.cpp). The transport itself is
+  tested in brolink.
 - Hardware streaming (Linux with a hardware encoder; skipped otherwise),
   per codec brovideo reports in hardware, ffmpeg decoding when it is on PATH
   (tests/test_hw_stream.cpp): a Server to a Client in process with a

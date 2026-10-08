@@ -3,7 +3,7 @@
 Remote desktop as a reusable C++20 library: a host submits its composited
 frames, broremote encodes them on the GPU and streams them to viewers, and
 viewers send keyboard and pointer input back. Transport security is ssh's: the
-server listens only on a local socket, and a remote viewer reaches it through
+server listens only on a local socket (a named pipe on Windows), and a remote viewer reaches it through
 `ssh host broremote proxy`.
 
 In the [bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md),
@@ -33,8 +33,9 @@ screen (docs/design.md has the details).
 
 ## Building
 
-The core needs a C++20 compiler, CMake 3.24, the platform's sockets and
-brovideo, checked out beside this repository (`../brovideo`, or
+The core needs a C++20 compiler, CMake 3.24, and two siblings checked out
+beside this repository: brolink, the local IPC and ssh transport
+(`../brolink`, or `-DBROLINK_DIR=<path>`), and brovideo (`../brovideo`, or
 `-DBROVIDEO_DIR=<path>`; on Linux brovideo needs `../brodmabuf` too). Which
 codecs are built is brovideo's choice (`BROVIDEO_WITH_VAAPI`, on on Linux
 when libva is found; `BROVIDEO_WITH_MF`, on on Windows).
@@ -96,8 +97,12 @@ broremote record --ssh HOST --frames 60 --out s.h264  # capture what a server se
 
 The server's socket is `$XDG_RUNTIME_DIR/broremote/<name>.sock` (mode 0600 in
 a 0700 directory, peers checked to be the same user); `--socket NAME` picks
-the name, `default` by default. Windows hosts too, with an AF_UNIX socket under
-`%LOCALAPPDATA%\broremote\`, but that is for tests and development: the real
-host is bro on Linux.
+the name, `default` by default. Windows hosts too, on a named pipe
+`\\.\pipe\broremote-<SID>-<name>` that only the same user can open, but that
+is for tests and development: the real host is bro on Linux.
+
+Input goes on a connection of its own (protocol 1.2's input lane), so it
+never waits behind video: with `--ssh` the viewer runs a second ssh for it.
+`--no-input-lane` sends it on the one connection instead.
 
 MIT licensed.

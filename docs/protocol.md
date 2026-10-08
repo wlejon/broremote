@@ -1,8 +1,8 @@
-# broremote wire protocol, version 1.1
+# broremote wire protocol, version 1.2
 
-A viewer and a broremote server talk over one byte stream. Locally that is an AF_UNIX stream socket (on Linux and, for tests and development, on Windows). Remotely it is the stdio of `ssh host broremote proxy`, which relays bytes to the remote host's local socket without reading them. The protocol is the same in every case, and nothing in it depends on the transport.
+A viewer and a broremote server talk over byte streams: a control connection, and from 1.2 optionally further connections (lanes, below) that join its session. Locally each is a connection to the server's local address: an AF_UNIX stream socket on Linux and macOS, a named pipe on Windows. Remotely each is the stdio of its own `ssh host broremote proxy`, which relays bytes to the remote host's local address without reading them. The protocol is the same in every case, and nothing in it depends on the transport. The transport (local listener and connector, peer checks, spawned streams, the proxy relay, lane grants) is the brolink sibling's.
 
-The protocol is hand-rolled and length-prefixed. Every field is bounds-checked when read, and a peer never trusts a length it receives. Structs are never copied onto the wire. The code lives in `include/broremote/wire.h` (primitives) and `include/broremote/protocol.h` (messages); this document and those headers describe the same format.
+The protocol is hand-rolled and length-prefixed. Every field is bounds-checked when read, and a peer never trusts a length it receives. Structs are never copied onto the wire. The framing and primitives are brolink's (`brolink/wire.h`, wrapped by `include/broremote/wire.h`), the messages are in `include/broremote/protocol.h`; this document and those headers describe the same format.
 
 ## Framing
 
@@ -30,7 +30,7 @@ Readers reject a length or count that the remaining bytes could not hold, so a h
 
 ## Versioning
 
-- The client's first message must be `Hello`. Any other message first gets `Error(HelloRequired)` and the connection is closed.
+- The client's first message must be `Hello` (or, from 1.2, `Join` on a lane connection). Any other message first gets `Error(HelloRequired)` and the connection is closed.
 - `Hello` carries the magic bytes `BRRM`, `major` and `minor`. A wrong magic is `Error(BadMessage)`; another major is `Error(VersionMismatch)`; both close the connection. Otherwise the server answers `Welcome`.
 - **Minor versions only add.** A newer minor may append fields to the end of a body; every decoder ignores trailing bytes. A newer minor may also add message types:
   - A server answers an unknown type with `Error(UnknownMessage)` and stays connected.
@@ -61,6 +61,29 @@ RequestKeyframe  ------------------>
 - **Flow control.** A client acks the highest frame id it has finished with: decoded, or abandoned after a decode error (it then sends `RequestKeyframe`). While any client has `max_frames_in_flight` (default 2) unacked frames, the server encodes nothing: the newest submitted frame waits and is encoded as soon as an ack opens the window, and older ones are dropped before encoding. So a slow link gets fewer frames, never a backlog, and encoded packets are never dropped (dropping a predicted frame would corrupt every frame up to the next keyframe). A client that never acks stalls the stream for everyone, which is the point: the server serves the slowest viewer.
 - **Codec choice.** The server's own preference list (`ServerConfig::codecs`, minus what this build cannot encode) is the order. A client may narrow it with `SetCodec`; the server picks the first of its codecs that every client which sent `SetCodec` listed. If there is none, the client whose `SetCodec` made it impossible gets `Error(NoCommonCodec)` and is closed. The bitrate is the server's, lowered to the smallest nonzero `max_bitrate_kbps` any client sent.
 
+## Lanes (1.2)
+
+A session can spread over several connections, so that one kind of traffic never waits behind another: input written while a 2 MB keyframe is queued on the control connection would otherwise sit behind it, in the server's queue and in every buffer of the ssh hop. Each connection is a lane; the control connection (the one that sent `Hello`) is the session.
+
+```
+control connection                  server
+Hello            ------------------>
+                 <------------------ Welcome (+ grant: session id, token)
+...
+second connection
+Join(session, token, "input") ----->
+                 <------------------ Joined     (or Error(JoinRefused), closed)
+Input, Ping      ------------------>
+                 <------------------ Pong
+```
+
+- **The grant.** A 1.2 server ends `Welcome` with `varint session` and a 32-byte `token` from the OS CSPRNG (`getrandom` / `BCryptGenRandom`). It is the only way to join the session; a server that could not get random bytes sends no grant, and its client has no lanes.
+- **Join.** A new connection's first message is `Join` instead of `Hello`. The server compares the token in constant time. A wrong token, an unknown session, a lane name the server does not have, or a lane already joined is `Error(JoinRefused)` (the message says which) and the connection is closed. Each lane name joins once per session. `Join` on a connection that sent `Hello` is `Error(BadMessage)`.
+- **The input lane.** The only lane is `input` (`kInputLane`). It carries `Input`, and `Ping` so the client can time it (answered with `Pong` on the lane). Any other message on it gets `Error(UnknownMessage)` and the lane stays; `Hello` or a second `Join` is `Error(BadMessage)`. Nothing else is sent on it: video, cursor and errors for the session go on the control connection. Input from either connection goes to the host in the order each connection delivered it; a client that has an input lane sends all its input there.
+- **Lifetime.** The session ends with its control connection, which closes its lanes. A lane closing leaves the session as it was; the client then sends input on the control connection again.
+- **Transport.** A lane reaches the server any way the control connection can: another local connection, or another `ssh host broremote proxy`. Each is its own TCP connection over ssh, so input never queues behind video anywhere.
+- A 1.0 / 1.1 server sends no grant, so a client never sends `Join` to one.
+
 ## Messages: client to server (0x01xx)
 
 | Type | Name | Body |
@@ -71,6 +94,7 @@ RequestKeyframe  ------------------>
 | 0x0104 | Input | `InputEvent` (below) |
 | 0x0105 | SetCodec | `varint n` (at most 16), `u8 codec` × n (preference order; unknown values are skipped), `varint max_bitrate_kbps` (32-bit; 0 = no limit) |
 | 0x0106 | Ping (1.1) | `u64 token` — answered at once with `Pong`. A client sends it only to a server whose `Welcome` says minor >= 1 |
+| 0x0107 | Join (1.2) | `varint session`, `u8[32] token` (both from the `Welcome` grant), `str lane` (at most 64 bytes; `input`) — the first message of a lane connection |
 
 ### InputEvent
 
@@ -88,13 +112,14 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 
 | Type | Name | Body |
 |------|------|------|
-| 0x0201 | Welcome | `u16 major`, `u16 minor`, `str server_name` (at most 256 bytes) |
+| 0x0201 | Welcome | `u16 major`, `u16 minor`, `str server_name` (at most 256 bytes); 1.2 appends the lane grant: `varint session`, `u8[32] token` |
 | 0x0202 | StreamConfig | `varint stream_id`, `u8 codec`, `varint width`, `varint height` (1..16384 each), `varint fps` (a hint) |
 | 0x0203 | Video | `varint stream_id`, `varint frame_id`, `svarint pts_ns`, `u8 flags` (bit 0 keyframe; other bits ignored), `bytes bitstream`; 1.1 appends `varint submit_us`, `varint queue_us`, `varint encode_us` (below) |
 | 0x0204 | Cursor | `bool visible`, `svarint x`, `svarint y` (32-bit, stream pixels), `varint hotspot_x`, `varint hotspot_y`, `str shape` (a CSS cursor name, at most 64 bytes) |
 | 0x0205 | Error | `u16 code`, `str message` (at most 4096 bytes) |
 | 0x0206 | Pong (1.1) | `u64 token` (the Ping's), `u64 server_time_us` (the server's monotonic clock when it answered) |
 | 0x0207 | FrameSent (1.1) | `varint frame_id`, `varint wait_us`, `varint write_us` |
+| 0x0208 | Joined (1.2) | (empty) — the `Join` was accepted; the connection is now that lane |
 
 ### Timing (1.1)
 
@@ -126,6 +151,7 @@ Error codes:
 | 5 | NoCommonCodec | closed |
 | 6 | EncoderFailed | closed (every client): the encoder could not be created or failed |
 | 7 | ServerShutdown | closed (every client): the host destroyed the server |
+| 8 | JoinRefused (1.2) | closed: a `Join` was refused (bad token, no such session or lane, lane already joined) |
 
 ## The Raw codec
 

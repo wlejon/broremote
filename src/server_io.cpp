@@ -274,7 +274,8 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
     c.minor = h.minor;
     c.attached = true;
     attached.fetch_add(1);
-    WelcomeMsg w{kProtocolMajor, kProtocolMinor, cfg.name};
+    WelcomeMsg w;
+    w.name = cfg.name;
     // The client's session: further connections join it as lanes with this
     // grant. Without one (the OS refused random bytes) the client simply
     // has no lanes and sends everything on this connection.
