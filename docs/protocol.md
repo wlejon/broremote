@@ -104,11 +104,11 @@ So a viewer can tell where a frame's age comes from:
 - **Video timing.** After the bitstream: `submit_us`, the server clock when the host submitted the frame; `queue_us`, from then to the encode starting (the encoder busy, or the ack window shut); `encode_us`, the conversion and encode. A 1.0 server sends none (the body ends at the bitstream); when present the three are whole, and a body that ends partway through them is malformed.
 - **FrameSent.** Sent to a client whose `Hello` said minor >= 1, once the last byte of a `Video` was written to that client's socket: `wait_us` from the packet being queued for the client to its first byte being written, `write_us` from the first byte to the last (socket backpressure). It follows the `Video` it describes.
 
-Codecs:
+Codecs (the `u8 codec` is brovideo's `Codec` value, which brovideo keeps stable):
 
 | Value | Codec | Bitstream in `Video` |
 |-------|-------|----------------------|
-| 0 | Raw | the Raw format below (built in everywhere; for tests, not real use) |
+| 0 | Raw | brovideo's Raw format (below; built in everywhere; for tests, not real use) |
 | 1 | H264 | Annex B, parameter sets in band on every keyframe |
 | 2 | HEVC | Annex B, parameter sets in band on every keyframe |
 | 3 | AV1 | one temporal unit of OBUs, sequence header on every keyframe |
@@ -129,15 +129,4 @@ Error codes:
 
 ## The Raw codec
 
-`Codec::Raw` carries RGBA pixels, run-length coded, with predicted frames between keyframes so that keyframe handling is exercised exactly as with a real codec:
-
-```
-packet := u8 kind                 -- 0 intra (a keyframe), 1 delta (predicted)
-          varint width, varint height
-          token*                  -- until width * height pixels are covered
-token  := varint t                -- n = (t >> 1) + 1 pixels
-          t & 1 = 1: u8[4] pixel  -- that pixel, n times
-          t & 1 = 0: u8[4 * n]    -- n literal pixels
-```
-
-A pixel is the bytes R, G, B, A. In a delta packet each pixel is XORed with the same pixel of the previous picture, so unchanged areas are runs of zero; a delta packet without a previous picture of the same size is a lost sync. A token that runs past the picture, a truncated packet, or a picture of more than 8192 × 8192 pixels is malformed. After any error the decoder drops its reference, so only a keyframe decodes next.
+`Codec::Raw` is brovideo's: RGBA pixels, run-length coded, with XOR-delta predicted frames between keyframes so that keyframe handling is exercised exactly as with a real codec. Its packet format is specified in brovideo's docs/raw.md; a `Video` message carries one such packet unchanged.

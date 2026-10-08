@@ -21,6 +21,10 @@ its own against the interfaces here.
 - **No GPL.** Codecs are reached through platform APIs (VA-API on Linux, Media
   Foundation on Windows), never through ffmpeg/x264. ffmpeg/ffprobe are used
   only by tests, as an oracle, when present.
+- **Not a codec library.** Every encoder and decoder is brovideo's
+  (../brovideo; its docs/design.md has the VA-API and Media Foundation
+  details and the driver workarounds). broremote decides which codec a
+  session uses, when a keyframe is needed and when to encode at all.
 
 ## Parts
 
@@ -29,22 +33,13 @@ include/broremote/
   wire.h        primitives: little-endian ints, LEB128 varints, bounds-checked Reader
   protocol.h    message types and their encode/decode
   stream.h      blocking byte streams: local socket, child-process stdio (ssh), stdio
-  frame.h       Frame (dmabuf or CPU), EncodedPacket, DecodedFrame, InputEvent, CursorState
-  codec.h       Codec, EncoderConfig, Encoder / Decoder interfaces and the factory
+  frame.h       brovideo's Frame, Packet (EncodedPacket), Picture (DecodedFrame); InputEvent, CursorState
+  codec.h       brovideo's Codec, Encoder, Decoder and their configs; codec_known() for the wire
   server.h      Server: the host submits frames and drains input
   client.h      Client: connects, receives packets, sends input
   api.h         the JavaScript binding's public header (forwards to src/api)
 src/            implementation; src/posix, src/win for platform pieces
 src/api/        broremote_api, the bronze JavaScript binding (bro.remote)
-src/codec_factory.cpp, src/codec_backends.h
-                the factory: the one place a backend registers
-src/vaapi/      VA-API encoder (Linux): va_device (nodes, probe), va_source
-                (fence, dmabuf import, CPU upload), va_vpp (colour
-                conversion), va_encoder (the common half), va_h264,
-                va_hevc, va_av1 (parameters and packed headers)
-src/mf/         Media Foundation decoder (Windows): mf_util (startup, MFT
-                lookup, D3D11 device), mf_bitstream (keyframe detection),
-                mf_decoder (the decoder), mf_probe (factory entry points)
 tools/          broremote (CLI: proxy, serve-test, codecs, encode, record),
                 connect (the --ssh/--socket target, shared), test_pattern,
                 picture (decoded pictures to RGBA, PSNR)
@@ -53,25 +48,22 @@ tools/view/     broremote-view: keymap (SDL scancode -> evdev), input_map,
                 each frame's time goes; latency probes), display_timing
                 (when a present reached the screen, from DXGI), viewer_app
                 (window, render loop), png, main
-tests/          ctest suite; tests/fixtures holds recorded VA-API streams
+tests/          ctest suite
 ```
 
 CMake target `broremote` (alias `broremote::broremote`). Options:
 `BROREMOTE_BUILD_TESTS`, `BROREMOTE_BUILD_TOOLS`, `BROREMOTE_BUILD_VIEWER`
-(on when SDL3 is found), `BROREMOTE_WITH_VAAPI` (auto on Linux when libva and
-libva-drm are found), `BROREMOTE_WITH_MF` (on for Windows),
-`BROREMOTE_ENABLE_API` (off; bro turns it on: builds `broremote_api` and its
-test against bronze, below). A disabled backend
-is simply absent from the codec factory; nothing else changes. A backend adds
-its sources and defines `BROREMOTE_HAVE_VAAPI` / `BROREMOTE_HAVE_MF` on the
-`broremote` target; `src/codec_backends.h` declares its entry points
-(`vaapi_encoders()` + `create_vaapi_encoder()`, `mf_decoders()` +
-`create_mf_decoder()`) and `src/codec_factory.cpp` calls them behind those
-`#if`s. The `*_encoders()` / `*_decoders()` probes report what the machine can
-actually do, so `available_encoders()` is honest on a box without the hardware.
+(on when SDL3 is found), `BROREMOTE_ENABLE_API` (off; bro turns it on: builds
+`broremote_api` and its test against bronze, below). Which codecs exist is
+brovideo's build (`BROVIDEO_WITH_VAAPI`, auto on Linux when libva is found;
+`BROVIDEO_WITH_MF`, on for Windows) and brovideo's run-time probe
+(`brovideo::capabilities()`), so the codec lists the server and viewer offer
+are honest on a box without the hardware.
 
 Dependencies resolve by the ecosystem convention (existing target, then
-`../<name>`, then `third_party/<name>`), though the core needs none. SDL3 for
+`../<name>`, then `third_party/<name>`). brovideo is required: an existing
+`brovideo` target, else `-DBROVIDEO_DIR`, else `../brovideo` (which on Linux
+needs `../brodmabuf` in turn). SDL3 for
 the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`; on
 Windows, when no vcpkg toolchain file points at it, the vcpkg trees at
 `$VCPKG_ROOT`, `../vcpkg` and `../../vcpkg` (triplet x64-windows) are tried,
@@ -171,35 +163,20 @@ kind it does not know (a newer minor's) instead of treating it as an error.
 
 ### Frame
 
+The frame, packet and picture types are brovideo's (brovideo/frame.h),
+brought into broremote by name:
+
 ```cpp
-struct DmabufPlane { int fd; uint32_t offset, pitch; };
-struct Frame {
-    uint32_t width, height;
-    uint32_t drm_format;          // DRM fourcc, e.g. XRGB8888
-    uint64_t modifier;            // DRM format modifier
-    uint32_t plane_count;         // 0 => CPU frame
-    DmabufPlane planes[4];
-    int acquire_fence_fd = -1;    // sync_file; the content is ready when it signals (-1: ready)
-    const uint8_t* cpu = nullptr; // CPU frame (plane_count == 0): RGBA8 rows, bytes R G B A
-    uint32_t cpu_stride = 0;      // bytes between CPU rows; 0 => width * 4
-    int64_t pts_ns = 0;
-};
-struct EncodedPacket { std::vector<uint8_t> data; bool keyframe; int64_t pts_ns; };
-enum class PixelFormat : uint8_t { RGBA8, NV12 };
-struct DecodedFrame {
-    bool ready;                   // false: the decoder took the input but has no picture yet
-    uint32_t width, height;
-    PixelFormat format;           // Raw gives RGBA8; MF gives NV12
-    uint32_t stride, uv_offset;   // NV12: Y rows, then (height+1)/2 interleaved UV rows at uv_offset
-    std::vector<uint8_t> data;
-};
+using Frame = brovideo::Frame;           // dmabuf planes + acquire fence, or CPU RGBA/BGRA rows
+using EncodedPacket = brovideo::Packet;  // data, keyframe, pts_ns
+using DecodedFrame = brovideo::Picture;  // RGBA8 (Raw) or NV12 (MF), CPU memory or a D3D11 texture
 struct CursorState { bool visible; int32_t x, y; uint32_t hotspot_x, hotspot_y; std::string shape; };
 ```
 
 The fds belong to the host. The server never closes them; it holds the frame
-until it calls the release callback. `drm_format` is ignored for CPU frames.
-`DecodedFrame` is CPU memory; a zero-copy D3D11 texture path for the viewer
-can be added beside it when the MF decoder needs one.
+until it calls the release callback. The viewer asks its decoders for CPU
+pictures: the read-back and upload cost about 1-2 ms of a 16.7 ms frame, so
+brovideo's D3D11 texture output is not used yet.
 
 ### Server (host side)
 
@@ -254,8 +231,9 @@ on damage: a released frame would leave the viewer on a stale picture until
 the next change. Encoded packets are never dropped: with predicted frames,
 dropping one corrupts every frame up to the next keyframe. A client joining, a
 `RequestKeyframe`, or a size change forces a keyframe (and, for a size,
-codec or bitrate change, a new encoder and a new `StreamConfig`). An encoder
-serves one size; the server makes a new one per stream. A client that has not
+codec or bitrate change, a new `StreamConfig`). A size or bitrate change
+reconfigures the encoder (`Encoder::reconfigure`); a codec change, or a
+reconfigure the encoder refuses, makes a new one. A client that has not
 yet had a keyframe of the current stream is sent no predicted frames. Frame
 ids count every packet from 1 across streams. If the encoder cannot be made
 or fails, every client gets `Error(EncoderFailed)` and is closed.
@@ -310,154 +288,44 @@ ack, say) must not assume `connect()` has returned yet.
 
 ### Codecs
 
-```cpp
-enum class Codec : uint8_t { Raw = 0, H264 = 1, HEVC = 2, AV1 = 3 };
-struct EncoderConfig { uint32_t width, height, fps = 60, bitrate_kbps = 20000; };
-class Encoder {
-public:
-    virtual ~Encoder() = default;
-    // Converts and encodes one frame of the configured size. Calls `release`
-    // exactly once, as soon as the frame's memory is no longer read (before
-    // the encode itself finishes), on failure too. The first packet and every
-    // forced one are keyframes.
-    virtual bool encode(const Frame&, bool force_keyframe, const std::function<void()>& release,
-                        EncodedPacket& out, std::string* err) = 0;
-};
-class Decoder {
-public:
-    virtual ~Decoder() = default;
-    virtual bool decode(std::span<const uint8_t> bitstream, DecodedFrame& out, std::string* err) = 0;
-    virtual std::string describe() const { return {}; }  // e.g. "Media Foundation h264, hardware (D3D11)"
-};
-std::unique_ptr<Encoder> create_encoder(Codec, const EncoderConfig&, std::string* err);
-std::unique_ptr<Decoder> create_decoder(Codec, std::string* err);
-std::vector<Codec> available_encoders();
-std::vector<Codec> available_decoders();
-```
+Every encoder and decoder is brovideo's (`brovideo::create_encoder`,
+`brovideo::create_decoder`; codec.h brings the names into broremote). Its
+docs/design.md is the reference for the API contract (release exactly once,
+keyframe rules, lost sync, picture cropping), the VA-API encoder (colour,
+device choice, sequence and HRD buffer, packed headers, AV1 padding and the
+radeonsi/VCN workarounds) and the Media Foundation decoder (hardware,
+latency, sync checks, probe). `Codec::Raw` is brovideo's too (its
+docs/raw.md); it is there so the protocol and server/client run and are
+tested everywhere (CI, Windows, a box with no VA-API), not for real use.
 
-`Codec::Raw` is built in on every platform: CPU frames, RGBA, run-length
-compressed, with XOR-delta predicted frames between keyframes so keyframe
-handling is exercised as with a real codec (a delta with no reference is a
-lost sync). Its format is in docs/protocol.md. It exists so the protocol and
-server/client run and are tested everywhere (CI, Windows, a box with no
-VA-API), not for real use.
+What stays in broremote is the policy around them:
 
-`Decoder::decode` returns false when the bitstream is bad or the decoder lost
-sync; the viewer then acks the frame anyway and requests a keyframe.
-`describe()` says what is decoding, for a viewer's title and report (added
-with the MF decoder: whether a picture comes from the GPU or the CPU is the
-first thing to know about a slow viewer). The stream's size is the truth: a
-decoded picture can be larger than the `StreamConfig` (AV1 on VCN codes
-1080 lines as 1082), so a consumer crops it to the config's width and
-height, which for `DecodedFrame` is just a smaller `width`/`height` over the
-same rows and `uv_offset`.
+- *Which codec.* `ServerConfig::codecs` is the server's preference list;
+  `Server::create` drops what brovideo cannot encode here
+  (`brovideo::codecs(Direction::Encode)`) and fails when nothing is left.
+  Clients narrow it with `SetCodec` (above). HEVC is the default, then H.264:
+  on a LAN AV1 gains little on desktop content, and radeonsi uses none of
+  AV1's screen-content tools; AV1 is offered when asked for. The viewer
+  offers what brovideo can decode here (`codecs(Direction::Decode)`).
+- *Keyframes.* A client joining, a `RequestKeyframe`, a new stream, or the
+  optional `keyframe_interval_s` forces one; otherwise every frame is
+  predicted. The viewer requests one after a failed decode (once per run of
+  failures) and acks the failed frame anyway.
+- *When to encode.* Only while a client is attached and the ack window is
+  open (flow control, above); the host is told through `wants_frames()`.
+- *Reconfigure.* A size or bitrate change reconfigures the encoder in place;
+  a codec change makes a new one. Either way a new `StreamConfig` goes out.
+- *Cropping.* The `StreamConfig` size is the truth: a decoded picture can be
+  larger (AV1 on VCN codes 1080 lines as 1082), and the viewer crops it to
+  the config's width and height.
+- *Which decoder.* The viewer asks for `Hardware::Prefer` and CPU pictures
+  (`$BROVIDEO_HARDWARE=0` forces software). `Decoder::describe()` goes in
+  the window title and the report: whether a picture comes from the GPU or
+  the CPU is the first thing to know about a slow viewer.
 
-**VA-API encoder (Linux).** Waits on the acquire fence (a CPU `poll` on the
-sync_file, failing after one second), imports the dmabuf as a VA surface (DRM
-PRIME 2, with the modifier; XRGB8888, ARGB8888, XBGR8888, ABGR8888; planes
-on one buffer are one object, so DCC metadata planes work), runs a VideoProc
-pass to an NV12 surface it owns (BT.709, limited range, scaled to the
-visible size at the top left of the coded surface), waits for that copy,
-releases the frame, then encodes. CPU frames are copied into an RGBA VA
-surface (mapped directly where the driver allows) and released as soon as
-the copy is done; they take the same VideoProc path, so there is no colour
-conversion on the CPU. The imported surface is made and destroyed per frame:
-holding imports across frames would pin host buffers the host may free.
-
-- *Colour.* The RGB input is tagged BT.709, not sRGB: tagged sRGB, radeonsi
-  also converts the transfer function and lifts every mid-tone by about five
-  code values. Chroma is centre-sited (the pass then averages each 2x2 block
-  rather than point-sampling, 1.3 dB RGB PSNR on the test pattern) and the
-  stream says so (`chroma_sample_loc_type` 1), with the BT.709 limited-range
-  colour description.
-- *Device.* One VADisplay per encoder, opened on the first frame: for a
-  dmabuf frame, the render node whose kernel driver exported it
-  (`exp_name` in `/proc/self/fdinfo`), else the first render node with the
-  codec and VideoProc. `$BROREMOTE_VAAPI_DEVICE` names the node instead.
-  `vaapi_encoders()` probes each node once per process (driver init, about
-  15 ms) and is empty, not an error, without a node or a driver; libva itself
-  is linked, so it must be installed where the library runs.
-- *Sequence.* I and P only, no B-frames: an IDR, then predicted frames each
-  referencing only the one before it (two reconstructed surfaces
-  alternate), until the next forced keyframe. CBR at the configured bitrate
-  with a 50 ms HRD buffer (three frames at 60 fps: a big change is one
-  packet that must cross the link before it shows, and with half a second
-  of buffer desktop-like content made packets of up to 450 kB, 4-5 ms over
-  ssh, against about 110 kB and 1.5 ms now, mean latency unchanged; the
-  first frame after a big change is softer and sharpens over the next few)
-  and no filler (`disable_bit_stuffing`):
-  padding a quiet desktop up to the bitrate is wasted bandwidth, and on VCN 4
-  (encoder firmware ENC 1.24) an AV1 frame needing more than about 35 KB of
-  padding OBU hangs the encode ring. Mesa enables filler in CBR unless the
-  application turns it off; ffmpeg's VA-API encoders and RADV's Vulkan Video
-  leave it on. H.264: High (Main / Constrained Baseline
-  when High is missing), `frame_num` and POC (type 0, 2 per frame) with
-  8-bit wrap. HEVC Main: IDR_W_RADL then TRAIL_R, an explicit one-entry
-  short-term RPS in each slice header, coding tools and block sizes from the
-  driver's HEVC attributes. Surfaces follow `VASurfaceAttribAlignmentSize`
-  (64x16 for HEVC on radeonsi); the SPS crops to the visible size.
-- *Headers.* When the driver takes packed sequence, picture and slice
-  headers, the encoder writes them: SPS (and VPS) with the colour
-  description, chroma siting, timing, and `max_num_reorder_frames` 0 /
-  `max_dec_frame_buffering` 1 so a decoder outputs each picture at once;
-  PPS; the slice header. radeonsi (Mesa 26) parses them and writes the NAL
-  units itself from what it parsed (it clears `transform_8x8_mode_flag`,
-  which its hardware lacks). All three are required there: without a packed
-  slice header it writes slices with `nal_unit_type` 0 and no SPS or PPS at
-  all. A driver without packed-header support writes every header from the
-  parameter buffers. Either way each IDR carries its parameter sets, so
-  decoding can start at any keyframe with nothing prepended.
-- *AV1* is implemented (profile 0, the same shape: slot 0 always holds the
-  previous frame; sequence and frame headers packed, with the VA bit
-  offsets). It is offered but not the default (HEVC is: on a LAN, AV1 gains
-  little on desktop content, and radeonsi uses none of AV1's screen-content
-  tools). AV1 cannot crop, and VCN 4 encodes the frame at its surface
-  alignment (1366x770 as 1408x784, 1080 lines as 1082; a hardware limit),
-  keeping the visible size only in `render_size`, which ffmpeg and dav1d do
-  not apply: a viewer crops to the `StreamConfig` size. radeonsi's VA
-  frontend reads only the first OBU of a packed-header buffer, so a temporal
-  delimiter there hides the sequence header and the driver divides by zero
-  in `vaEndPicture`: the encoder prepends the delimiter to each packet
-  itself.
-
-**Media Foundation decoder (Windows).** The system's synchronous decoder
-MFT for the codec (`MFTEnumEx`, NV12 output): msmpeg2vdec for H.264, the
-HEVC and AV1 Video Extensions where installed. Vendor asynchronous hardware
-MFTs are not used; the system MFTs do DXVA themselves once given a device.
-
-- *Hardware.* When the MFT is `MF_SA_D3D11_AWARE`, a D3D11 device (video
-  support, multithread protected) goes to it through an
-  `IMFDXGIDeviceManager`; if it refuses, the decoder runs in software. DXVA
-  pictures are slices of the decoder's texture array: each is copied to a
-  staging texture and read back. Software pictures come as `IMF2DBuffer`s.
-  Either way the visible area (the minimum display aperture) is copied out
-  into `DecodedFrame` NV12, so a 1080-line picture in a 1088-line surface
-  comes out 1080 lines. `$BROREMOTE_MF_HARDWARE=0` forces software.
-- *Latency.* `CODECAPI_AVLowLatencyMode` and `MF_LOW_LATENCY` are set. The
-  input type carries a placeholder size (the HEVC and AV1 MFTs offer no
-  output type without one); the real size arrives as
-  `MF_E_TRANSFORM_STREAM_CHANGE` on the first keyframe, and any later size
-  change the same way, renegotiating NV12. Some MFTs (the HEVC extension in
-  software) still hold each picture until they see the next access unit
-  start; when a packet gives no picture, the decoder feeds an access unit
-  delimiter (a temporal delimiter for AV1), which hands it over. A drain
-  would too, but those MFTs then accept no further input.
-- *Sync and errors.* The MFTs conceal rather than fail a predicted frame
-  with no reference, so the decoder checks it itself (`mf_bitstream`: an
-  H.264 IDR, an HEVC IRAP, an AV1 temporal unit with a sequence header and a
-  key frame) and returns false (lost sync) for anything before the first
-  keyframe and after any failure, which also flushes the MFT. Garbage the
-  MFT accepts is not detectable; it shows as corruption until the next
-  keyframe, which the reliable ssh transport makes moot in practice.
-- *Probe.* `mf_decoders()` reports a codec only when a real keyframe of it
-  (a flat grey 192x192 picture, embedded) decodes to the right picture,
-  through D3D11 and else in software, once per process (about 0.7 s for all
-  three; the viewer overlaps it with ssh starting). Why a codec is missing
-  is kept and appended to `create_decoder`'s error and shown by
-  `broremote codecs`.
-- *Measured* (RTX 4090, Windows 11): H.264, HEVC and AV1 all decode in
-  hardware. 1920x1080 to CPU NV12 per frame: H.264 1.9 ms hardware / 3.6 ms
-  software, HEVC 1.4 / 4.1 ms.
+Measured decode (RTX 4090, Windows 11, Media Foundation, 1920x1080 to CPU
+NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
+(VCN 4, dmabuf to packet): 2.7-2.9 ms at 1920x1080, 4.4 ms at 2560x1440.
 
 ## Tools
 
@@ -639,7 +507,8 @@ gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
 `bro.remote` owns the Server: `host({socket, codecs, bitrateKbps, fps,
 name})` makes one (the same options again keep it; others replace it),
 `stop()` destroys it, `status()` reports it (clients, the stream from
-`Server::stream()`, `stats()`), `codecs()` is `available_encoders()`, and
+`Server::stream()`, `stats()`), `codecs()` is what brovideo can encode here
+(`brovideo::codecs(Direction::Encode)`), and
 `attach` / `detach` events fire as the client count changes. The binding
 never names the host: the host sets `HostHooks` before `installRemote()`,
 and `serverChanged(server, config)` tells it when a server starts and just
@@ -668,35 +537,15 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
 - Protocol 1.1 timing: Ping / Pong, every Video's timing inside the Pongs
   around it, FrameSent per frame in order, none to a 1.0 client, and the
   window-wait count (tests/test_server.cpp, tests/test_wire.cpp).
-- VA-API (Linux with a VA encoder; skipped otherwise), per reported codec,
-  ffmpeg decoding when it is on PATH (tests/test_vaapi.cpp): a 300-frame
-  CPU sequence past the frame_num/POC wraps with forced keyframes, decoded
-  whole and from each keyframe alone (frame count, a clean decode, every
-  picture compared with its source); a size change to a size cropped both
-  ways; GBM dmabufs with real sync_file fences: linear, GBM's pick of the
-  primary plane's modifiers (DCC on amdgpu), and every modifier the plane
-  offers that GBM can allocate; a Server to a Client in process, and
-  `broremote serve-test` in its own process to a Client; release called once
-  per frame before `encode()` returns, with the frame's memory scribbled
-  over in the callback. The bar is luma PSNR >= 35 dB against the ideal
-  BT.709 luma: the pattern's full-swing colour edges cap RGB PSNR near
-  33-35 dB before any coding (measured as ffmpeg's own uncoded 4:2:0 round
-  trip), so RGB must instead stay within 5 dB of that ceiling with under one
-  code value of mean error per channel, which catches a wrong matrix, range,
-  transfer or channel order. Also measures dmabuf-to-packet latency at
-  1920x1080 and 2560x1440.
-- Media Foundation (Windows, tests/test_mf.cpp): with ffmpeg on PATH, the
-  test pattern encoded by libx264 / libx265 / libaom (I and P only) at
-  640x360 then 718x404 in one stream, decoded per codec the machine reports:
-  every picture's size, frame counter, luma PSNR >= 35 dB, RGB PSNR and
-  colour swatches, in hardware and in software; starting at a later
-  keyframe (the predicted frames before it are lost sync, then every frame
-  decodes); garbage and truncated packets mid-stream (no crash; the next
-  keyframe decodes cleanly); and the 1920x1080 decode time. Without ffmpeg
-  those are skipped. Always: the VA-API encoder's own H.264 and HEVC
-  (tests/fixtures/halo_vaapi.*, recorded with `broremote record` from the
-  halo's serve-test at 640x360, 3 Mbit/s) decode with every picture matching
-  the pattern frame its counter names (52-53 dB luma).
+- Hardware streaming (Linux with a hardware encoder; skipped otherwise),
+  per codec brovideo reports in hardware, ffmpeg decoding when it is on PATH
+  (tests/test_hw_stream.cpp): a Server to a Client in process with a
+  keyframe request halfway, and `broremote serve-test` in its own process to
+  a Client; every picture compared with the source frame its counter names
+  (luma PSNR >= 35 dB, RGB within 5 dB of the uncoded 4:2:0 ceiling), whole
+  and from each keyframe alone. The encoders and decoders themselves (quality
+  bars, dmabuf frames, latency, the Media Foundation fixtures) are tested in
+  brovideo.
 - The viewer (tests/test_view.cpp, wherever SDL3 is found): an in-process
   Server streams Raw to the real `Viewer` on SDL's offscreen driver in a
   1000x1000 window (the 640x360 picture letterboxed); injected SDL events

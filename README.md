@@ -8,6 +8,10 @@ server listens only on a local socket, and a remote viewer reaches it through
 
 In the [bro ecosystem](https://github.com/wlejon/bro/blob/main/docs/ecosystem.md),
 broremote remotes helm, the desktop shell. It does not depend on bro or bronze.
+Its codecs are [brovideo](../brovideo)'s (hardware encode and decode: VA-API
+on Linux, Media Foundation on Windows, and the Raw codec everywhere);
+broremote keeps the remoting policy around them: which codec a session
+uses, when to send a keyframe, and when to encode at all.
 
 [docs/design.md](docs/design.md) is the design and the contract between the
 parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
@@ -18,10 +22,8 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 |------|-------|
 | Wire primitives, protocol, streams (local socket, ssh child, stdio) | done, tested on Windows and Linux |
 | Server (I/O + encode threads, ack window, keyframes, input, cursor) and Client | done, tested on Windows and Linux |
-| `Codec::Raw` (CPU RGBA, run-length + XOR-delta) and the codec factory | done |
 | `broremote proxy`, `serve-test`, `codecs`, `encode`, `record` | done |
-| VA-API encoder (Linux): HEVC (default), H.264, AV1 | done, tested on radeonsi |
-| Media Foundation decoder (Windows): H.264, HEVC, AV1, D3D11 or software | done |
+| Codecs: Raw, VA-API encode (HEVC default, H.264, AV1), Media Foundation decode | in brovideo |
 | `broremote-view` (SDL3): Windows decodes; Linux shows Raw only, so far | done |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | not yet |
 
@@ -31,8 +33,11 @@ screen (docs/design.md has the details).
 
 ## Building
 
-The core has no dependencies beyond a C++20 compiler, CMake 3.24 and the
-platform's sockets.
+The core needs a C++20 compiler, CMake 3.24, the platform's sockets and
+brovideo, checked out beside this repository (`../brovideo`, or
+`-DBROVIDEO_DIR=<path>`; on Linux brovideo needs `../brodmabuf` too). Which
+codecs are built is brovideo's choice (`BROVIDEO_WITH_VAAPI`, on on Linux
+when libva is found; `BROVIDEO_WITH_MF`, on on Windows).
 
 Windows (Visual Studio 2022; one build dir, the config picked at build time):
 ```bash
@@ -50,8 +55,7 @@ ctest --test-dir build
 
 Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
 `BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_BUILD_VIEWER` (on when SDL3 is
-found), `BROREMOTE_WITH_VAAPI` (on on Linux when libva is found),
-`BROREMOTE_WITH_MF` (on on Windows), `BROREMOTE_ENABLE_API` (off; the
+found), `BROREMOTE_ENABLE_API` (off; the
 `bro.remote` JavaScript binding, which bro turns on; it needs ../bronze and
 ../brass).
 
