@@ -8,6 +8,7 @@
 #include "viewer.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <random>
 #include <thread>
 
@@ -115,7 +116,7 @@ void test_serve_test_pattern() {
     const std::string name = unique_name("pattern");
     std::string err;
     auto p = Process::spawn(
-        {g_exe, "serve-test", "--socket", name, "--size", "640x360", "--fps", "30", "--seconds", "60"}, &err);
+        {g_exe, "serve-test", "--socket", name, "--size", "640x360", "--fps", "30", "--seconds", "3"}, &err);
     CHECK(p != nullptr);
     if (!p) return;
     std::unique_ptr<Stream> s;
@@ -147,9 +148,23 @@ void test_serve_test_pattern() {
     tools::draw_test_pattern(want.data(), 640, 360, uint64_t(c1));
     CHECK(want == later.pixels);
     v.client().send_input(InputEvent::motion(5, 6));
+    // serve-test stops by itself (--seconds) while the viewer is attached:
+    // the viewer is told, and the socket file is removed.
+    WAIT(v.is_closed(), 20000);
+    CHECK(v.has_error(ErrorCode::ServerShutdown));
+    int code = -1;
+    CHECK(p->wait_for(std::chrono::seconds(20), &code));
+    CHECK_EQ(code, 0);
+    bool not_running = false;
+    CHECK(connect_local(name, nullptr, &not_running) == nullptr);
+    CHECK(not_running);
+    std::string path = socket_path(name);
+    CHECK(!path.empty());
+    std::error_code ec;
+    if (std::filesystem::exists(std::filesystem::symlink_status(std::filesystem::path(path), ec))) {
+        check::fail(__FILE__, __LINE__, "the socket file outlived serve-test: " + path);
+    }
     v.close();
-    p->kill();
-    CHECK(p->wait_for(std::chrono::seconds(10)));
 }
 
 }  // namespace

@@ -26,6 +26,9 @@ using Clock = std::chrono::steady_clock;
 using SharedMessage = std::shared_ptr<const std::string>;
 
 inline constexpr size_t kMaxQueuedInput = 65536;
+// A client whose unsent output grows past this is not reading (the ack window
+// bounds video for a client that is): it is dropped.
+inline constexpr size_t kMaxQueuedOutput = 256u << 20;
 
 struct ClientConn {
     uint64_t id = 0;
@@ -33,6 +36,7 @@ struct ClientConn {
     wire::MessageSplitter in;
     std::deque<SharedMessage> out;
     size_t out_offset = 0;          // bytes of out.front() already written
+    size_t out_bytes = 0;           // bytes queued in `out` (including out.front()'s written part)
     bool attached = false;          // Hello answered with Welcome
     bool synced = false;            // sent a keyframe of the current stream
     std::deque<uint64_t> unacked;   // frame ids sent and not yet acked, oldest first
@@ -91,6 +95,7 @@ struct Server::Impl {
     void handle_hello(ClientConn& c, std::string_view payload);
     void handle_set_codec(ClientConn& c, std::string_view payload);
     void close_client(ClientConn& c, ErrorCode code, const std::string& message);
+    void drop_unsent(ClientConn& c);
     void read_client(ClientConn& c);
     void flush_client(ClientConn& c);
     void shutdown_clients();

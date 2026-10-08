@@ -133,7 +133,9 @@ bool Server::Impl::paused() const {
 
 void Server::Impl::queue(ClientConn& c, SharedMessage msg) {
     if (c.dead || c.closing) return;
+    c.out_bytes += msg->size();
     c.out.push_back(std::move(msg));
+    if (c.out_bytes > kMaxQueuedOutput) c.dead = true;
 }
 
 void Server::Impl::queue_attached(const SharedMessage& msg) {

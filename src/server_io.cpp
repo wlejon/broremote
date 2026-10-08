@@ -9,6 +9,7 @@ namespace broremote {
 namespace {
 
 constexpr auto kCloseGrace = std::chrono::milliseconds(1000);
+constexpr auto kProbeInterval = std::chrono::milliseconds(250);
 constexpr size_t kReadChunk = 64u << 10;
 constexpr size_t kMaxReadPerPass = 4u << 20;  // then let the other clients have a turn
 
@@ -18,6 +19,7 @@ SharedMessage shared(std::string s) { return std::make_shared<const std::string>
 
 void Server::Impl::io_loop() {
     std::vector<net::PollItem> items;
+    auto next_probe = Clock::now() + kProbeInterval;
     std::unique_lock<std::mutex> lk(m);
     while (!stop) {
         // Poll set: the waker, the listener, then every client in order.
@@ -35,7 +37,7 @@ void Server::Impl::io_loop() {
         }
         const size_t polled = clients.size();
         lk.unlock();
-        const bool ok = net::poll(items, any_closing ? 50 : -1);
+        const bool ok = net::poll(items, any_closing ? 50 : int(kProbeInterval.count()));
         lk.lock();
         if (stop) break;
         if (!ok) {
@@ -47,10 +49,15 @@ void Server::Impl::io_loop() {
         }
         if (items[0].readable) waker.drain();
 
+        // Every so often read every client whatever the poll said: a missed
+        // readiness event (Windows AF_UNIX does miss a peer's close) must not
+        // leave a dead client attached, holding the ack window shut.
+        const bool probe = Clock::now() >= next_probe;
+        if (probe) next_probe = Clock::now() + kProbeInterval;
         // Clients only change on this thread, so items[2 + i] is still clients[i].
         for (size_t i = 0; i < polled; ++i) {
             ClientConn& c = *clients[i];
-            if (items[2 + i].readable && !c.closing) read_client(c);
+            if ((items[2 + i].readable || probe) && !c.closing) read_client(c);
         }
         if (items[1].readable) {
             for (;;) {
@@ -122,20 +129,26 @@ void Server::Impl::flush_client(ClientConn& c) {
         }
         c.out_offset += size_t(n);
         if (c.out_offset == front.size()) {
+            c.out_bytes -= front.size();
             c.out.pop_front();
             c.out_offset = 0;
         }
     }
 }
 
-void Server::Impl::close_client(ClientConn& c, ErrorCode code, const std::string& message) {
-    if (c.dead || c.closing) return;
-    // Nothing that is not yet on its way matters to a client being closed,
-    // except a partly written message, which must finish to keep the Error
-    // readable.
+// Nothing that is not yet on its way matters to a client being closed, except
+// a partly written message, which must finish to keep what follows readable.
+void Server::Impl::drop_unsent(ClientConn& c) {
     if (c.out_offset == 0) c.out.clear();
     else c.out.erase(c.out.begin() + 1, c.out.end());
+    c.out_bytes = c.out.empty() ? 0 : c.out.front()->size();
+}
+
+void Server::Impl::close_client(ClientConn& c, ErrorCode code, const std::string& message) {
+    if (c.dead || c.closing) return;
+    drop_unsent(c);
     c.out.push_back(shared(ErrorMsg{code, message}.encode()));
+    c.out_bytes += c.out.back()->size();
     if (c.attached) attached.fetch_sub(1);
     c.closing = true;
     c.close_deadline = Clock::now() + kCloseGrace;
@@ -148,8 +161,7 @@ void Server::Impl::shutdown_clients() {
     const SharedMessage bye = shared(ErrorMsg{ErrorCode::ServerShutdown, "the server is shutting down"}.encode());
     for (auto& c : clients) {
         if (!c->dead && !c->closing) {
-            if (c->out_offset == 0) c->out.clear();
-            else c->out.erase(c->out.begin() + 1, c->out.end());
+            drop_unsent(*c);
             c->out.push_back(bye);
             flush_client(*c);
         }
