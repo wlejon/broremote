@@ -36,7 +36,10 @@ include/broremote/
 src/            implementation; src/posix, src/win for platform pieces
 src/codec_factory.cpp, src/codec_backends.h
                 the factory: the one place a backend registers
-src/vaapi/      VA-API encoder (Linux)
+src/vaapi/      VA-API encoder (Linux): va_device (nodes, probe), va_source
+                (fence, dmabuf import, CPU upload), va_vpp (colour
+                conversion), va_encoder (the common half), va_h264,
+                va_hevc, va_av1 (parameters and packed headers)
 src/mf/         Media Foundation decoder (Windows)
 tools/          broremote (CLI: proxy, serve-test, codecs), broremote-view (viewer)
 tests/          ctest suite
@@ -309,14 +312,63 @@ VA-API), not for real use.
 `Decoder::decode` returns false when the bitstream is bad or the decoder lost
 sync; the viewer then acks the frame anyway and requests a keyframe.
 
-**VA-API encoder (Linux).** Imports the dmabuf as a VA surface (DRM PRIME 2,
-with the modifier), waits on the acquire fence, runs a VideoProc pass to an
-NV12 surface it owns (BT.709, limited range; the conversion also crops/pads to
-the coded size), releases the frame, then encodes. H.264 High (Main/Constrained
-Baseline when High is missing), low-latency: I and P frames only, no
-B-frames, one reference, CBR at the configured bitrate, keyframe on demand,
-parameter sets in-band on every IDR. HEVC and AV1 follow the same shape. CPU
-frames are uploaded to a VA surface and take the same path.
+**VA-API encoder (Linux).** Waits on the acquire fence (a CPU `poll` on the
+sync_file, failing after one second), imports the dmabuf as a VA surface (DRM
+PRIME 2, with the modifier; XRGB8888, ARGB8888, XBGR8888, ABGR8888; planes
+on one buffer are one object, so DCC metadata planes work), runs a VideoProc
+pass to an NV12 surface it owns (BT.709, limited range, scaled to the
+visible size at the top left of the coded surface), waits for that copy,
+releases the frame, then encodes. CPU frames are copied into an RGBA VA
+surface (mapped directly where the driver allows) and released as soon as
+the copy is done; they take the same VideoProc path, so there is no colour
+conversion on the CPU. The imported surface is made and destroyed per frame:
+holding imports across frames would pin host buffers the host may free.
+
+- *Colour.* The RGB input is tagged BT.709, not sRGB: tagged sRGB, radeonsi
+  also converts the transfer function and lifts every mid-tone by about five
+  code values. Chroma is centre-sited (the pass then averages each 2x2 block
+  rather than point-sampling, 1.3 dB RGB PSNR on the test pattern) and the
+  stream says so (`chroma_sample_loc_type` 1), with the BT.709 limited-range
+  colour description.
+- *Device.* One VADisplay per encoder, opened on the first frame: for a
+  dmabuf frame, the render node whose kernel driver exported it
+  (`exp_name` in `/proc/self/fdinfo`), else the first render node with the
+  codec and VideoProc. `$BROREMOTE_VAAPI_DEVICE` names the node instead.
+  `vaapi_encoders()` probes each node once per process (driver init, about
+  15 ms) and is empty, not an error, without a node or a driver; libva itself
+  is linked, so it must be installed where the library runs.
+- *Sequence.* I and P only, no B-frames: an IDR, then predicted frames each
+  referencing only the one before it (two reconstructed surfaces
+  alternate), until the next forced keyframe. CBR at the configured bitrate
+  with a half-second HRD buffer. H.264: High (Main / Constrained Baseline
+  when High is missing), `frame_num` and POC (type 0, 2 per frame) with
+  8-bit wrap. HEVC Main: IDR_W_RADL then TRAIL_R, an explicit one-entry
+  short-term RPS in each slice header, coding tools and block sizes from the
+  driver's HEVC attributes. Surfaces follow `VASurfaceAttribAlignmentSize`
+  (64x16 for HEVC on radeonsi); the SPS crops to the visible size.
+- *Headers.* When the driver takes packed sequence, picture and slice
+  headers, the encoder writes them: SPS (and VPS) with the colour
+  description, chroma siting, timing, and `max_num_reorder_frames` 0 /
+  `max_dec_frame_buffering` 1 so a decoder outputs each picture at once;
+  PPS; the slice header. radeonsi (Mesa 26) parses them and writes the NAL
+  units itself from what it parsed (it clears `transform_8x8_mode_flag`,
+  which its hardware lacks). All three are required there: without a packed
+  slice header it writes slices with `nal_unit_type` 0 and no SPS or PPS at
+  all. A driver without packed-header support writes every header from the
+  parameter buffers. Either way each IDR carries its parameter sets, so
+  decoding can start at any keyframe with nothing prepended.
+- *AV1* is implemented (profile 0, the same shape: slot 0 always holds the
+  previous frame; sequence and frame headers packed, with the VA bit
+  offsets) but not reported unless `BROREMOTE_VAAPI_AV1=1`. AV1 cannot crop,
+  and radeonsi encodes the frame at its surface alignment (1366x770 as
+  1408x784, 1080 lines as 1082), keeping the visible size only in
+  `render_size`, which ffmpeg and dav1d do not apply: the decoded picture
+  would not be the stream's size. An opt-in run also hung the VCN ring once
+  (1080p, scanout dmabufs; the kernel reset the ring). Two radeonsi quirks
+  are handled: a temporal delimiter inside a packed header makes it fail to
+  parse the sequence header (and divide by zero in `vaEndPicture`), so the
+  encoder prepends the delimiter to each packet; and the sequence header
+  must carry `timing_info`.
 
 **Media Foundation decoder (Windows).** The H.264 (and HEVC/AV1 where the
 system has them) decoder MFT, hardware-accelerated through a D3D11 device
@@ -335,6 +387,10 @@ manager where available, low-latency mode on, NV12 out.
   so and exits 1. Input it receives is printed to stderr; pointer motion
   moves the cursor it reports.
 - `broremote codecs`: what this build can encode and decode here.
+- `broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS]
+  [--fps N] [--keyframe-every N] [--out FILE]`: the test pattern straight
+  through an encoder, no server; writes the elementary stream and prints the
+  per-frame encode time.
 - `broremote-view [--ssh HOST | --socket NAME] [--ssh-command CMD]`: SDL3
   window; decodes and shows the stream scaled to the window with the aspect
   kept; sends keys, pointer and wheel; requests a keyframe on decode error;
@@ -366,9 +422,23 @@ gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
   (tests/test_server.cpp).
 - `broremote proxy` as a child stream relaying a whole session, and
   `serve-test` end to end (tests/test_proxy.cpp).
-- VA-API (Linux with a VA encoder): encode a known pattern, decode with
-  ffmpeg (when present) and compare PSNR against the source; dmabuf import
-  from a GBM buffer.
+- VA-API (Linux with a VA encoder; skipped otherwise), per reported codec,
+  ffmpeg decoding when it is on PATH (tests/test_vaapi.cpp): a 300-frame
+  CPU sequence past the frame_num/POC wraps with forced keyframes, decoded
+  whole and from each keyframe alone (frame count, a clean decode, every
+  picture compared with its source); a size change to a size cropped both
+  ways; GBM dmabufs with real sync_file fences: linear, GBM's pick of the
+  primary plane's modifiers (DCC on amdgpu), and every modifier the plane
+  offers that GBM can allocate; a Server to a Client in process, and
+  `broremote serve-test` in its own process to a Client; release called once
+  per frame before `encode()` returns, with the frame's memory scribbled
+  over in the callback. The bar is luma PSNR >= 35 dB against the ideal
+  BT.709 luma: the pattern's full-swing colour edges cap RGB PSNR near
+  33-35 dB before any coding (measured as ffmpeg's own uncoded 4:2:0 round
+  trip), so RGB must instead stay within 5 dB of that ceiling with under one
+  code value of mean error per channel, which catches a wrong matrix, range,
+  transfer or channel order. Also measures dmabuf-to-packet latency at
+  1920x1080 and 2560x1440.
 - Media Foundation (Windows): decode a fixture bitstream produced by ffmpeg
   and compare against the expected pattern.
 - End to end: `serve-test` on the halo, `broremote-view --ssh halo` on
