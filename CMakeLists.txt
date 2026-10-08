@@ -139,7 +139,7 @@ endif()
 
 # ---- the broremote executable: proxy and serve-test ----------------------------
 if(BROREMOTE_BUILD_TOOLS)
-    add_executable(broremote_cli tools/broremote.cpp tools/test_pattern.cpp)
+    add_executable(broremote_cli tools/broremote.cpp tools/connect.cpp tools/test_pattern.cpp)
     # ARCHIVE_OUTPUT_NAME: keep an import library MSVC may emit for the
     # executable from colliding with broremote.lib.
     set_target_properties(broremote_cli PROPERTIES OUTPUT_NAME broremote ARCHIVE_OUTPUT_NAME broremote_cli)

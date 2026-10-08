@@ -2,24 +2,32 @@
 //   broremote proxy [--socket NAME]
 //       Relay stdin/stdout to the local server's socket (what a remote viewer
 //       runs as `ssh host broremote proxy`).
-//   broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N] [--seconds N]
+//   broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N] [--bitrate KBPS] [--seconds N]
 //       A server fed a moving test pattern (CPU frames), so a viewer can be
 //       tested with no bro. Input events received are printed to stderr.
 //   broremote codecs
 //       The codecs this build can encode and decode here.
+//   broremote encode ...
+//       The test pattern straight through an encoder, to a file.
+//   broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C] [--frames N] --out FILE
+//       Connect as a viewer and write the bitstream to a file.
+#include "broremote/client.h"
 #include "broremote/protocol.h"
 #include "broremote/server.h"
 #include "broremote/stream.h"
+#include "connect.h"
 #include "test_pattern.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,10 +44,12 @@ int usage() {
     std::fprintf(stderr,
                  "usage: broremote proxy [--socket NAME]\n"
                  "       broremote serve-test [--socket NAME] [--size WxH] [--codec raw|h264|hevc|av1] [--fps N]\n"
-                 "                            [--seconds N]\n"
+                 "                            [--bitrate KBPS] [--seconds N]\n"
                  "       broremote codecs\n"
                  "       broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS] [--fps N]\n"
                  "                        [--keyframe-every N] [--out FILE]\n"
+                 "       broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C]\n"
+                 "                        [--frames N] --out FILE\n"
                  "       broremote --version\n");
     return 2;
 }
@@ -103,6 +113,8 @@ int cmd_serve_test(int argc, char** argv) {
             cfg.codecs = {*c};
         } else if (!std::strcmp(a, "--fps") && has) {
             if (!parse_uint(argv[++i], cfg.fps) || cfg.fps == 0 || cfg.fps > 1000) return usage();
+        } else if (!std::strcmp(a, "--bitrate") && has) {
+            if (!parse_uint(argv[++i], cfg.bitrate_kbps) || cfg.bitrate_kbps == 0) return usage();
         } else if (!std::strcmp(a, "--seconds") && has) {
             if (!parse_uint(argv[++i], seconds)) return usage();
         } else {
@@ -278,6 +290,92 @@ int cmd_codecs() {
     return 0;
 }
 
+// Connect as a viewer and write the stream's bitstream to a file (from its
+// first keyframe), acking each packet: a capture of what a server really
+// sends, e.g. for decoder fixtures.
+int cmd_record(int argc, char** argv) {
+    tools::ConnectTarget target;
+    uint32_t frames = 60;
+    std::string out_path;
+    ClientOptions opts;
+    opts.name = "broremote record";
+    for (int i = 0; i < argc; ++i) {
+        const char* a = argv[i];
+        const bool has = i + 1 < argc;
+        if (tools::parse_connect_arg(argc, argv, i, target)) continue;
+        if (!std::strcmp(a, "--frames") && has) {
+            if (!parse_uint(argv[++i], frames) || frames == 0) return usage();
+        } else if (!std::strcmp(a, "--codec") && has) {
+            auto c = parse_codec(argv[++i]);
+            if (!c) return usage();
+            opts.codecs = {*c};
+        } else if (!std::strcmp(a, "--out") && has) {
+            out_path = argv[++i];
+        } else {
+            return usage();
+        }
+    }
+    if (out_path.empty()) return usage();
+    std::FILE* out = std::fopen(out_path.c_str(), "wb");
+    if (!out) {
+        std::fprintf(stderr, "broremote record: cannot write %s\n", out_path.c_str());
+        return 1;
+    }
+    std::mutex m;
+    std::condition_variable cv;
+    Client* client = nullptr;
+    uint32_t written = 0, keyframes = 0;
+    uint64_t bytes = 0;
+    bool done = false;
+    std::string closed;
+    ClientHandlers h;
+    h.on_config = [](const StreamConfig& sc) {
+        std::fprintf(stderr, "broremote record: stream %llu: %s %ux%u at %u fps\n",
+                     static_cast<unsigned long long>(sc.stream_id), codec_name(sc.codec), sc.width, sc.height, sc.fps);
+    };
+    h.on_video = [&](const VideoPacket& v) {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait_for(lk, std::chrono::seconds(10), [&] { return client != nullptr || done; });
+        if (!done && (written > 0 || v.keyframe)) {
+            std::fwrite(v.data.data(), 1, v.data.size(), out);
+            bytes += v.data.size();
+            keyframes += v.keyframe ? 1 : 0;
+            if (++written >= frames) done = true;
+        }
+        if (client) client->ack(v.frame_id);
+        cv.notify_all();
+    };
+    h.on_closed = [&](const std::string& why) {
+        std::lock_guard<std::mutex> lk(m);
+        closed = why;
+        done = true;
+        cv.notify_all();
+    };
+    std::string err;
+    auto stream = tools::open_stream(target, &err);
+    std::unique_ptr<Client> c = stream ? Client::connect(std::move(stream), std::move(h), opts, &err) : nullptr;
+    if (!c) {
+        std::fclose(out);
+        std::fprintf(stderr, "broremote record: %s\n", err.c_str());
+        return 1;
+    }
+    {
+        std::unique_lock<std::mutex> lk(m);
+        client = c.get();
+        cv.notify_all();
+        cv.wait_for(lk, std::chrono::seconds(60), [&] { return done; });
+    }
+    c.reset();
+    std::fclose(out);
+    std::fprintf(stderr, "broremote record: %u packets (%u keyframes), %llu bytes to %s\n", written, keyframes,
+                 static_cast<unsigned long long>(bytes), out_path.c_str());
+    if (written < frames) {
+        std::fprintf(stderr, "broremote record: stopped early: %s\n", closed.empty() ? "timed out" : closed.c_str());
+        return 1;
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -287,6 +385,7 @@ int main(int argc, char** argv) {
     if (cmd == "serve-test") return cmd_serve_test(argc - 2, argv + 2);
     if (cmd == "codecs") return cmd_codecs();
     if (cmd == "encode") return cmd_encode(argc - 2, argv + 2);
+    if (cmd == "record") return cmd_record(argc - 2, argv + 2);
     if (cmd == "--version") {
         std::printf("broremote %s, protocol %u.%u\n", "0.1.0", unsigned(kProtocolMajor), unsigned(kProtocolMinor));
         return 0;
