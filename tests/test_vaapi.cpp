@@ -14,7 +14,8 @@
 //     the frame's memory is scribbled over in the release callback, so any
 //     read after release would show as a PSNR failure.
 //   - A Server streaming to a Client over the local socket, decoded with
-//     ffmpeg, including a keyframe request.
+//     ffmpeg, including a keyframe request; and `broremote serve-test` in
+//     its own process streaming to a Client here.
 //   - Per-frame encode latency of dmabuf frames at 1920x1080 and 2560x1440.
 #include "broremote/client.h"
 #include "broremote/server.h"
@@ -374,13 +375,88 @@ void test_latency(Codec codec) {
     }
 }
 
-// A Server fed CPU frames streams to a Client over the local socket.
+std::string unique_socket(const char* what) {
+    static std::random_device rd;
+    return std::string("t-vaapi-") + what + "-" + std::to_string(rd() % 1000000);
+}
+
+// A viewer that keeps every packet and acks it (as a decoding viewer would).
+class Receiver {
+public:
+    bool connect(std::unique_ptr<Stream> stream) {
+        ClientHandlers hd;
+        hd.on_config = [this](const StreamConfig& sc) {
+            std::lock_guard<std::mutex> lk(m_);
+            configs_.push_back(sc);
+        };
+        hd.on_video = [this](const VideoPacket& v) {
+            Client* c = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                EncodedPacket p;
+                p.data = v.data;
+                p.keyframe = v.keyframe;
+                p.pts_ns = v.pts_ns;
+                packets_.push_back(std::move(p));
+                c = client_;
+            }
+            if (c) c->ack(v.frame_id);
+        };
+        std::string err;
+        owned_ = Client::connect(std::move(stream), std::move(hd), ClientOptions{}, &err);
+        if (!owned_) {
+            std::printf("   Client::connect: %s\n", err.c_str());
+            return false;
+        }
+        std::lock_guard<std::mutex> lk(m_);
+        client_ = owned_.get();
+        return true;
+    }
+    Client& client() { return *owned_; }
+    size_t count() {
+        std::lock_guard<std::mutex> lk(m_);
+        return packets_.size();
+    }
+    // Closes the client and returns what it received.
+    std::vector<EncodedPacket> finish(std::vector<StreamConfig>* configs) {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            client_ = nullptr;
+        }
+        owned_.reset();
+        std::lock_guard<std::mutex> lk(m_);
+        if (configs) *configs = configs_;
+        return std::move(packets_);
+    }
+
+private:
+    std::mutex m_;
+    std::vector<EncodedPacket> packets_;
+    std::vector<StreamConfig> configs_;
+    Client* client_ = nullptr;
+    std::unique_ptr<Client> owned_;
+};
+
+// The pattern counter of each decoded picture (the test pattern draws it).
+std::vector<int64_t> decoded_counters(Codec codec, const std::string& name, uint32_t w, uint32_t h) {
+    std::vector<std::vector<uint8_t>> frames;
+    std::string log;
+    oracle::decode(path_for(name), codec, w, h, frames, log);
+    std::vector<int64_t> out;
+    for (const auto& f : frames) {
+        const auto rgba = oracle::to_rgba(f);
+        out.push_back(broremote::tools::read_test_pattern_counter(rgba.data(), w, h, w * 4));
+    }
+    return out;
+}
+
+// A Server in this process, fed CPU frames one at a time, streams to a Client
+// over the local socket; the client requests a keyframe halfway.
 void test_server(Codec codec) {
     check::phase(std::string(codec_name(codec)) + ": server to client, decoded by ffmpeg");
     const uint32_t w = 960, h = 540, n_frames = 60;
-    std::random_device rd;
     ServerConfig cfg;
-    cfg.socket_name = "t-vaapi-" + std::to_string(rd() % 1000000);
+    cfg.socket_name = unique_socket("server");
     cfg.codecs = {codec};
     cfg.bitrate_kbps = 8000;
     std::string err;
@@ -390,58 +466,28 @@ void test_server(Codec codec) {
         std::printf("   Server::create: %s\n", err.c_str());
         return;
     }
-    std::mutex m;
-    std::vector<EncodedPacket> pkts;
-    std::vector<StreamConfig> configs;
-    Client* client_ptr = nullptr;
-    ClientHandlers hd;
-    hd.on_config = [&](const StreamConfig& sc) {
-        std::lock_guard<std::mutex> lk(m);
-        configs.push_back(sc);
-    };
-    hd.on_video = [&](const VideoPacket& v) {
-        Client* c = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(m);
-            EncodedPacket p;
-            p.data.assign(v.data.begin(), v.data.end());
-            p.keyframe = v.keyframe;
-            pkts.push_back(std::move(p));
-            c = client_ptr;
-        }
-        if (c) c->ack(v.frame_id);
-    };
-    auto stream = connect_local(cfg.socket_name, &err);
-    CHECK(stream != nullptr);
-    if (!stream) return;
-    auto client = Client::connect(std::move(stream), hd, ClientOptions{}, &err);
-    CHECK(client != nullptr);
-    if (!client) return;
-    {
-        std::lock_guard<std::mutex> lk(m);
-        client_ptr = client.get();
-    }
+    Receiver rx;
+    CHECK(rx.connect(connect_local(cfg.socket_name, &err)));
     WAIT(server->wants_frames(), 5000);
     std::vector<std::vector<uint8_t>> pool(n_frames);
     std::atomic<int> releases{0};
     for (uint32_t n = 0; n < n_frames; ++n) {
-        if (n == 30) client->request_keyframe();
-        if (n == 30) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (n == 30) {
+            rx.client().request_keyframe();
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
         pool[n] = pattern(w, h, n);
         Frame f;
         f.width = w;
         f.height = h;
         f.cpu = pool[n].data();
         server->submit(f, [&] { ++releases; });
-        WAIT([&] {
-            std::lock_guard<std::mutex> lk(m);
-            return pkts.size() == n + 1;
-        }(), 5000);
+        WAIT(rx.count() == n + 1, 5000);
     }
     CHECK_EQ(releases.load(), int(n_frames));
-    client.reset();
+    std::vector<StreamConfig> configs;
+    auto pkts = rx.finish(&configs);
     server.reset();
-    std::lock_guard<std::mutex> lk(m);
     CHECK_EQ(configs.size(), size_t(1));
     CHECK_EQ(pkts.size(), size_t(n_frames));
     if (pkts.size() != n_frames) return;
@@ -449,16 +495,76 @@ void test_server(Codec codec) {
     CHECK(pkts[30].keyframe);
     std::vector<uint64_t> source(n_frames);
     for (uint32_t i = 0; i < n_frames; ++i) source[i] = i;
-    verify_stream(codec, pkts, source, w, h, std::string(codec_name(codec)) + "-server");
+    const std::string name = std::string(codec_name(codec)) + "-server";
+    verify_stream(codec, pkts, source, w, h, name);
     if (!g_ffmpeg) return;
-    // The pattern's own counter, read back from the decoded pictures.
-    std::vector<std::vector<uint8_t>> frames;
-    std::string log;
-    oracle::decode(path_for(std::string(codec_name(codec)) + "-server"), codec, w, h, frames, log);
-    for (size_t i = 0; i < frames.size(); ++i) {
-        const auto rgba = oracle::to_rgba(frames[i]);
-        CHECK_EQ(broremote::tools::read_test_pattern_counter(rgba.data(), w, h, w * 4), int64_t(i));
+    const auto counters = decoded_counters(codec, name, w, h);
+    for (size_t i = 0; i < counters.size(); ++i) CHECK_EQ(counters[i], int64_t(i));
+}
+
+// `broremote serve-test --codec C` in its own process, free-running at 60
+// fps, to a Client here. The pattern's counter says which source frame each
+// decoded picture is (the server may replace frames while the client acks),
+// so each is compared with that frame.
+void test_serve_test(Codec codec, const std::string& cli) {
+    check::phase(std::string(codec_name(codec)) + ": broremote serve-test to a client, decoded by ffmpeg");
+    const uint32_t w = 1280, h = 720, n_packets = 180;
+    const std::string sock = unique_socket("servetest");
+    std::string err;
+    auto proc = Process::spawn({cli, "serve-test", "--socket", sock, "--codec", codec_name(codec), "--size", "1280x720",
+                                "--fps", "60", "--seconds", "60"},
+                               &err);
+    CHECK(proc != nullptr);
+    if (!proc) {
+        std::printf("   spawn: %s\n", err.c_str());
+        return;
     }
+    std::unique_ptr<Stream> s;
+    CHECK(check::wait_for(
+        [&] {
+            s = connect_local(sock);
+            return s != nullptr;
+        },
+        10000));
+    Receiver rx;
+    if (!s || !rx.connect(std::move(s))) {
+        CHECK(false);
+        proc->kill();
+        return;
+    }
+    WAIT(rx.count() >= n_packets / 2, 20000);
+    rx.client().request_keyframe();
+    WAIT(rx.count() >= n_packets, 20000);
+    std::vector<StreamConfig> configs;
+    auto pkts = rx.finish(&configs);
+    proc->kill();
+    proc->wait_for(std::chrono::seconds(10));
+    CHECK_EQ(configs.size(), size_t(1));
+    if (!configs.empty()) {
+        CHECK(configs[0].codec == codec);
+        CHECK_EQ(configs[0].width, w);
+        CHECK_EQ(configs[0].height, h);
+    }
+    CHECK(!pkts.empty() && pkts[0].keyframe);
+    size_t keys = 0;
+    for (const auto& p : pkts) keys += p.keyframe;
+    CHECK(keys >= 2);  // the first, and the one requested
+    if (!g_ffmpeg || pkts.empty()) return;
+    const std::string name = std::string(codec_name(codec)) + "-servetest";
+    oracle::write_file(path_for(name), concat(pkts, 0, pkts.size()));
+    const auto counters = decoded_counters(codec, name, w, h);
+    CHECK_EQ(counters.size(), pkts.size());
+    std::vector<uint64_t> source;
+    bool rising = true;
+    for (size_t i = 0; i < counters.size(); ++i) {
+        rising = rising && counters[i] >= 0 && (i == 0 || counters[i] > counters[i - 1]);
+        source.push_back(uint64_t(std::max<int64_t>(0, counters[i])));
+    }
+    CHECK(rising);
+    if (counters.size() == pkts.size() && rising) verify_stream(codec, pkts, source, w, h, name);
+    std::printf("   %s: %zu packets, %zu keyframes, source frames %lld..%lld\n", name.c_str(), pkts.size(), keys,
+                counters.empty() ? -1ll : static_cast<long long>(counters.front()),
+                counters.empty() ? -1ll : static_cast<long long>(counters.back()));
 }
 
 void remove_dir(const std::string& dir) {
@@ -473,8 +579,10 @@ void remove_dir(const std::string& dir) {
 
 }  // namespace
 
-int main() {
+// test_vaapi [path to the broremote executable, for the serve-test phase]
+int main(int argc, char** argv) {
     check::watchdog(900);
+    const std::string cli = argc > 1 ? argv[1] : "";
     std::vector<Codec> codecs;
     // $BROREMOTE_TEST_CODEC narrows the run to one codec.
     const char* only = std::getenv("BROREMOTE_TEST_CODEC");
@@ -502,6 +610,7 @@ int main() {
         test_size_change(c);
         test_dmabuf(c);
         test_server(c);
+        if (!cli.empty()) test_serve_test(c, cli);
         test_latency(c);
     }
     const int rc = check::finish();
