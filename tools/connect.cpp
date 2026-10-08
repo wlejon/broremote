@@ -9,6 +9,14 @@ std::string ConnectTarget::describe() const { return remote() ? ssh_host : "sock
 
 bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t) {
     const char* a = argv[i];
+    if (!std::strcmp(a, "--ssh-pty")) {
+        t.pty = true;
+        return true;
+    }
+    if (!std::strcmp(a, "--ssh-no-pty")) {
+        t.pty = false;
+        return true;
+    }
     if (i + 1 >= argc) return false;
     if (!std::strcmp(a, "--ssh")) {
         t.ssh_host = argv[++i];
@@ -25,8 +33,10 @@ bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t) {
 }
 
 std::string remote_command(const ConnectTarget& t) {
-    if (t.socket_given && !t.command_given) return t.ssh_command + " --socket " + t.socket;
-    return t.ssh_command;
+    std::string cmd = t.ssh_command;
+    if (t.socket_given && !t.command_given) cmd += " --socket " + t.socket;
+    if (t.pty) cmd += " --pty";
+    return cmd;
 }
 
 std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err) {
@@ -36,11 +46,23 @@ std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err) {
         if (!s && not_running && err) *err = "no broremote server is running on socket '" + t.socket + "'";
         return s;
     }
-    // -T: no remote tty (the stream is binary). BatchMode: ssh runs with no
-    // console to prompt on, so a password or host-key question must fail
-    // at once, with its reason on stderr, rather than hang.
-    const std::vector<std::string> argv = {"ssh", "-T", "-o", "BatchMode=yes", t.ssh_host, remote_command(t)};
-    return spawn_stream(argv, err);
+    // BatchMode: ssh runs with no console to prompt on, so a password or
+    // host-key question must fail at once, with its reason on stderr, rather
+    // than hang.
+    if (!t.pty) {
+        // -T: no remote tty, so the pipe is binary as it is; but OpenSSH
+        // then leaves Nagle on at both ends.
+        const std::vector<std::string> argv = {"ssh", "-T", "-o", "BatchMode=yes", t.ssh_host, remote_command(t)};
+        return spawn_stream(argv, err);
+    }
+    // -tt: a remote terminal, which is what makes OpenSSH set TCP_NODELAY
+    // (and the low-delay IPQoS) on both ends; the proxy makes the terminal
+    // raw and says so before any protocol byte. -e none: no escape
+    // character. ObscureKeystrokeTiming=no: OpenSSH 9.5+ would otherwise
+    // pace a terminal session's small writes into 20 ms chaff intervals.
+    const std::vector<std::string> argv = {"ssh",       "-tt", "-e", "none", "-o", "BatchMode=yes", "-o",
+                                           "ObscureKeystrokeTiming=no", t.ssh_host, remote_command(t)};
+    return await_proxy_ready(spawn_stream(argv, err));
 }
 
 }  // namespace broremote::tools

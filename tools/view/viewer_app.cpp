@@ -210,9 +210,9 @@ std::string Viewer::timing_text(const LatencyWindow& w) const {
     if (!w.frames) return w.rtt >= 0 ? "rtt " + std::to_string(w.rtt) + " ms, no frame timing" : "no timing yet";
     char buf[320];
     std::snprintf(buf, sizeof buf,
-                  "rtt %.2f | server: queue %.2f encode %.2f wait %.2f | net %.2f | dwait %.2f decode %.2f | "
-                  "present %.2f | age %.1f (max %.1f) ms, %.1f kB/frame",
-                  w.rtt, w.queue, w.encode, w.wait, w.net, w.dwait, w.decode, w.present, w.age, w.max_age,
+                  "rtt %.2f (mean %.2f max %.2f) | server: queue %.2f encode %.2f wait %.2f | net %.2f | dwait %.2f "
+                  "decode %.2f | present %.2f | age %.1f (max %.1f) ms, %.1f kB/frame",
+                  w.rtt, w.rtt_mean, w.rtt_max, w.queue, w.encode, w.wait, w.net, w.dwait, w.decode, w.present, w.age, w.max_age,
                   w.kbytes);
     return buf;
 }
@@ -377,7 +377,11 @@ int Viewer::finish() {
             all.age += w.age * k;
             all.kbytes += w.kbytes * k;
             all.max_age = std::max(all.max_age, w.max_age);
+            all.rtt_mean += w.rtt_mean * double(w.pongs);
+            all.pongs += w.pongs;
+            all.rtt_max = std::max(all.rtt_max, w.rtt_max);
         }
+        if (all.pongs) all.rtt_mean /= double(all.pongs);
         for (double* v : {&all.queue, &all.encode, &all.wait, &all.net, &all.dwait, &all.decode, &all.present,
                           &all.age, &all.kbytes})
             *v /= n;

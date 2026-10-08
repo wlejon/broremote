@@ -74,6 +74,23 @@ public:
 
 // `broremote proxy`: relay this process's stdin/stdout to the server called
 // `name` until either side closes. Returns the process exit code.
-int run_proxy(std::string_view name, std::string* err);
+//
+// `pty`: the proxy runs on a terminal ssh allocated (`ssh -tt`, which is
+// what makes OpenSSH turn Nagle off and mark the session low-delay). It
+// then puts that terminal in raw mode (no echo, no line editing, no
+// character translation: a binary-clean pipe), and only then writes
+// kProxyReady, before any protocol byte. A viewer must not send until it
+// has read it (await_proxy_ready), or the terminal's cooked mode would echo
+// and edit what it sent. Errors go to stdout before the marker too, since
+// a terminal merges stderr into it.
+int run_proxy(std::string_view name, std::string* err, bool pty = false);
+
+inline constexpr std::string_view kProxyReady = "\nbroremote-proxy-ready\n";
+
+// Wraps a stream to `broremote proxy --pty`: the first read or write first
+// reads up to and including kProxyReady, discarding it. If the stream ends
+// first, the first write fails and diagnostics() includes what came instead
+// (the proxy's error, or the remote shell's).
+std::unique_ptr<Stream> await_proxy_ready(std::unique_ptr<Stream> inner);
 
 }  // namespace broremote

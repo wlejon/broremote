@@ -8,9 +8,22 @@
 #include "viewer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
+#include <mutex>
 #include <random>
 #include <thread>
+
+#if !defined(_WIN32)
+#if defined(__APPLE__)
+#include <util.h>
+#else
+#include <pty.h>
+#endif
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 using namespace broremote;
 using testkit::FrameSource;
@@ -25,15 +38,79 @@ std::string unique_name(const char* what) {
     return std::string("t-") + what + "-" + std::to_string(rd() % 1000000);
 }
 
+// How the viewer reaches the proxy: plain pipes (ssh -T), pipes with the
+// --pty handshake, or (POSIX) a real terminal in its default cooked mode,
+// as ssh -tt gives the proxy, which --pty must make binary-clean.
+enum class Via { Pipe, PipePty, Terminal };
+Via g_via = Via::Pipe;
+
+#if !defined(_WIN32)
+// The master side of a terminal whose slave runs the proxy.
+class TerminalStream final : public Stream {
+public:
+    TerminalStream(int master, pid_t child) : fd_(master), child_(child) {}
+    ~TerminalStream() override {
+        shutdown();
+        ::waitpid(child_, nullptr, 0);
+        ::close(fd_);
+    }
+    size_t read(char* buf, size_t n) override {
+        for (;;) {
+            const ssize_t r = ::read(fd_, buf, n);
+            if (r > 0) return size_t(r);
+            if (r < 0 && errno == EINTR) continue;
+            return 0;  // EIO once the slave side is gone
+        }
+    }
+    bool write(std::string_view d) override {
+        std::lock_guard<std::mutex> lk(wm_);
+        while (!d.empty()) {
+            const ssize_t r = ::write(fd_, d.data(), d.size());
+            if (r < 0 && errno == EINTR) continue;
+            if (r <= 0) return false;
+            d.remove_prefix(size_t(r));
+        }
+        return true;
+    }
+    void shutdown() override {
+        if (!stopped_.exchange(true)) ::kill(child_, SIGTERM);
+    }
+
+private:
+    int fd_;
+    pid_t child_;
+    std::mutex wm_;
+    std::atomic<bool> stopped_{false};
+};
+#endif
+
 std::unique_ptr<Stream> proxy_to(const std::string& name) {
     std::string err;
-    auto s = spawn_stream({g_exe, "proxy", "--socket", name}, &err);
+    std::unique_ptr<Stream> s;
+    if (g_via == Via::Pipe) {
+        s = spawn_stream({g_exe, "proxy", "--socket", name}, &err);
+    } else if (g_via == Via::PipePty) {
+        s = await_proxy_ready(spawn_stream({g_exe, "proxy", "--socket", name, "--pty"}, &err));
+    } else {
+#if !defined(_WIN32)
+        int master = -1;
+        const pid_t pid = ::forkpty(&master, nullptr, nullptr, nullptr);
+        if (pid == 0) {
+            ::execl(g_exe.c_str(), g_exe.c_str(), "proxy", "--socket", name.c_str(), "--pty", (char*)nullptr);
+            ::_exit(127);
+        }
+        if (pid < 0) err = "forkpty failed";
+        else s = await_proxy_ready(std::make_unique<TerminalStream>(master, pid));
+#endif
+    }
     if (!s) std::printf("   spawn_stream: %s\n", err.c_str());
     return s;
 }
 
 void test_proxy_relay() {
-    check::phase("proxy relays a whole session");
+    check::phase(g_via == Via::Pipe       ? "proxy relays a whole session"
+                 : g_via == Via::PipePty ? "proxy --pty over pipes relays a whole session"
+                                         : "proxy --pty on a terminal relays a whole session, binary-clean");
     const std::string name = unique_name("proxy");
     ServerConfig cfg;
     cfg.socket_name = name;
@@ -177,6 +254,13 @@ int main(int argc, char** argv) {
     g_exe = argv[1];
     check::watchdog(240);
     test_proxy_relay();
+    g_via = Via::PipePty;
+    test_proxy_relay();
+#if !defined(_WIN32)
+    g_via = Via::Terminal;
+    test_proxy_relay();
+    g_via = Via::Pipe;
+#endif
     test_serve_test_unavailable_codec();
     test_serve_test_pattern();
     return check::finish();

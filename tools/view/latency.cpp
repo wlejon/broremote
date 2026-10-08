@@ -25,6 +25,9 @@ void LatencyTracker::on_pong(Clock::time_point sent, Clock::time_point received,
     s.offset_us = double(server_us) - (us_of(sent) + us_of(received)) / 2;
     s.at = received;
     std::lock_guard<std::mutex> lk(m_);
+    sum_.pongs += 1;
+    sum_.rtt_mean += s.rtt_us / 1000.0;
+    sum_.rtt_max = std::max(sum_.rtt_max, s.rtt_us / 1000.0);
     samples_.push_back(s);
     while (samples_.size() > kMaxSamples) samples_.pop_front();
 }
@@ -180,6 +183,7 @@ LatencyWindow LatencyTracker::take_window() {
     std::lock_guard<std::mutex> lk(m_);
     LatencyWindow w = sum_;
     sum_ = LatencyWindow{};
+    if (w.pongs) w.rtt_mean /= double(w.pongs);
     if (w.frames) {
         const double n = double(w.frames);
         w.queue /= n;

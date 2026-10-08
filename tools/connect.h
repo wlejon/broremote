@@ -16,6 +16,9 @@ struct ConnectTarget {
     std::string socket = "default";               // the local socket's name
     bool socket_given = false;                    // --socket was passed
     bool command_given = false;                   // --ssh-command was passed
+    // ssh -tt and `proxy --pty` (low delay: OpenSSH sets TCP_NODELAY only on
+    // a terminal session), or -T and a plain pipe (--ssh-no-pty).
+    bool pty = false;
 
     [[nodiscard]] bool remote() const { return !ssh_host.empty(); }
     // "halo" or "socket default", for titles and messages.

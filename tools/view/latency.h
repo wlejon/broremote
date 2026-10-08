@@ -37,6 +37,8 @@ using Clock = std::chrono::steady_clock;
 struct LatencyWindow {
     uint64_t frames = 0;   // presented frames with server timing
     double rtt = -1;       // the best recent round trip (-1: no Pong yet)
+    double rtt_mean = 0, rtt_max = 0;  // over the Pongs in the window
+    uint64_t pongs = 0;
     double queue = 0, encode = 0, wait = 0, net = 0, dwait = 0, decode = 0, present = 0;
     double age = 0;        // submit -> presented
     double kbytes = 0;     // mean packet size

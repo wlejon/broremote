@@ -1,5 +1,5 @@
 // broremote: the command-line tool.
-//   broremote proxy [--socket NAME]
+//   broremote proxy [--socket NAME] [--pty]
 //       Relay stdin/stdout to the local server's socket (what a remote viewer
 //       runs as `ssh host broremote proxy`).
 //   broremote serve-test [--socket NAME] [--size WxH] [--codec C] [--fps N] [--bitrate KBPS] [--seconds N]
@@ -42,7 +42,7 @@ void on_signal(int) { g_stop = true; }
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: broremote proxy [--socket NAME]\n"
+                 "usage: broremote proxy [--socket NAME] [--pty]\n"
                  "       broremote serve-test [--socket NAME] [--size WxH] [--codec raw|h264|hevc|av1] [--fps N]\n"
                  "                            [--bitrate KBPS] [--seconds N] [--window N] [--latency]\n"
                  "           --latency: answer each key / button press at once with a frame whose second\n"
@@ -75,13 +75,16 @@ bool parse_size(const char* s, uint32_t& w, uint32_t& h) {
 
 int cmd_proxy(int argc, char** argv) {
     std::string name(kDefaultSocketName);
+    bool pty = false;
     for (int i = 0; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--socket") && i + 1 < argc) name = argv[++i];
+        else if (!std::strcmp(argv[i], "--pty")) pty = true;
         else return usage();
     }
     std::string err;
-    const int rc = run_proxy(name, &err);
-    if (rc != 0) std::fprintf(stderr, "broremote proxy: %s\n", err.c_str());
+    const int rc = run_proxy(name, &err, pty);
+    // With --pty the error already went to stdout, where the viewer reads it.
+    if (rc != 0 && !pty) std::fprintf(stderr, "broremote proxy: %s\n", err.c_str());
     return rc;
 }
 
