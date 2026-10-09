@@ -4,7 +4,7 @@ project(broremote VERSION 0.1.0 LANGUAGES CXX)
 
 # Dependencies (cmake/bro_deps.cmake): an outer project's target wins (under bro
 # these are all bro's), else the ../<name> working tree beside the top-level
-# project, else the pinned commit, fetched at configure.
+# project, else the head of its main, fetched at configure.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -110,7 +110,7 @@ endif()
 target_compile_definitions(broremote PRIVATE BROREMOTE_HAS_PIPEWIRE=$<BOOL:${BROREMOTE_HAS_PIPEWIRE}>)
 # ---- brolink: the transport ---------------------------------------------------------
 # A bro_dependency (cmake/bro_deps.cmake): an existing brolink target (bro, or
-# bromux beside it, added it), else ../brolink, else the pinned commit.
+# bromux beside it, added it), else ../brolink, else the head of its main.
 bro_dependency(brolink GITHUB wlejon/brolink
                OPTIONS BROLINK_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brolink::brolink)
@@ -145,7 +145,7 @@ endif()
 # ---- the JavaScript binding (broremote_api) -----------------------------------------
 # bronze, the JavaScript runtime the binding is written against (it brings its
 # code generator, brass): an existing bronze_runtime_shared target (bro's), else
-# ../bronze, else the pinned commit. The binding crosses bronze's C++ embed
+# ../bronze, else the head of its main. The binding crosses bronze's C++ embed
 # boundary, so it has to build with the bronze (and the compiler and CRT) of
 # whatever it is linked into.
 if(BROREMOTE_ENABLE_API)
