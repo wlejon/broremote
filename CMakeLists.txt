@@ -111,14 +111,14 @@ target_compile_definitions(broremote PRIVATE BROREMOTE_HAS_PIPEWIRE=$<BOOL:${BRO
 # ---- brolink: the transport ---------------------------------------------------------
 # A bro_dependency (cmake/bro_deps.cmake): an existing brolink target (bro, or
 # bromux beside it, added it), else ../brolink, else the pinned commit.
-bro_dependency(brolink GITHUB wlejon/brolink REF 5696d385803b6e03fecd43694c5e6039da121ed5
+bro_dependency(brolink GITHUB wlejon/brolink
                OPTIONS BROLINK_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brolink::brolink)
 # ---- brovideo: the codecs ----------------------------------------------------------
 # An existing brovideo target (bro builds it), else ../brovideo, else the pinned
 # commit. Its backends are its own options (BROVIDEO_WITH_VAAPI,
 # BROVIDEO_WITH_MF); on Linux it brings brodmabuf.
-bro_dependency(brovideo GITHUB wlejon/brovideo REF 6182bff5a5c619ba5756615aee99a271969c9ed3
+bro_dependency(brovideo GITHUB wlejon/brovideo
                OPTIONS BROVIDEO_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brovideo::brovideo)
 
@@ -149,7 +149,7 @@ endif()
 # boundary, so it has to build with the bronze (and the compiler and CRT) of
 # whatever it is linked into.
 if(BROREMOTE_ENABLE_API)
-    bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+    bro_dependency(bronze GITHUB wlejon/bronze TARGET bronze_runtime_shared
                    OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
     message(STATUS "broremote: JavaScript binding (broremote_api) enabled")
     add_subdirectory(src/api)
