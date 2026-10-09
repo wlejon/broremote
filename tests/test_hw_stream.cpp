@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <csignal>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -266,6 +267,24 @@ void test_server(Codec codec) {
     for (size_t i = 0; i < counters.size(); ++i) CHECK_EQ(counters[i], int64_t(i));
 }
 
+// Stop serve-test the way a user would (SIGTERM: it shuts its server down and
+// removes its socket), SIGKILL only if it does not go; then its socket must
+// be gone. A killed server's files are swept by the next server binding in
+// the directory (brolink), but a test should not leave them to be.
+void stop_serve_test(Process& proc, const std::string& sock) {
+    ::kill(pid_t(proc.pid()), SIGTERM);
+    int code = -1;
+    const bool exited = proc.wait_for(std::chrono::seconds(10), &code);
+    if (!exited) {
+        proc.kill();
+        proc.wait_for(std::chrono::seconds(10));
+    }
+    CHECK(exited);  // serve-test exits on SIGTERM
+    const std::string path = socket_path(sock);
+    CHECK(::access(path.c_str(), F_OK) != 0);              // it removed its socket
+    CHECK(::access((path + ".lock").c_str(), F_OK) != 0);  // and its lock file
+}
+
 // `broremote serve-test --codec C` in its own process, free-running at 60
 // fps, to a Client here. The pattern's counter says which source frame each
 // decoded picture is (the server may replace frames while the client acks),
@@ -293,7 +312,7 @@ void test_serve_test(Codec codec, const std::string& cli) {
     Receiver rx;
     if (!s || !rx.connect(std::move(s))) {
         CHECK(false);
-        proc->kill();
+        stop_serve_test(*proc, sock);
         return;
     }
     WAIT(rx.count() >= n_packets / 2, 20000);
@@ -301,8 +320,7 @@ void test_serve_test(Codec codec, const std::string& cli) {
     WAIT(rx.count() >= n_packets, 20000);
     std::vector<StreamConfig> configs;
     auto pkts = rx.finish(&configs);
-    proc->kill();
-    proc->wait_for(std::chrono::seconds(10));
+    stop_serve_test(*proc, sock);
     CHECK_EQ(configs.size(), size_t(1));
     if (!configs.empty()) {
         CHECK(configs[0].codec == codec);

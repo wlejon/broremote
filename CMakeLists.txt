@@ -77,7 +77,7 @@ endif()
 # ---- brolink: the transport ---------------------------------------------------------
 # A bro_dependency (cmake/bro_deps.cmake): an existing brolink target (bro, or
 # bromux beside it, added it), else ../brolink, else the pinned commit.
-bro_dependency(brolink GITHUB wlejon/brolink REF b393d00256a47445b594fad06779fb546d7e0f65
+bro_dependency(brolink GITHUB wlejon/brolink REF 5696d385803b6e03fecd43694c5e6039da121ed5
                OPTIONS BROLINK_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brolink::brolink)
 # ---- brovideo: the codecs ----------------------------------------------------------
