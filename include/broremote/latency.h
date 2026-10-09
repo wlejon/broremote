@@ -9,7 +9,7 @@
 //            server's socket, the proxy, ssh both ways, the network, the pipe
 //   dwait    received -> the decode thread started on it
 //   decode   the decode
-//   present  decoded -> SDL_RenderPresent returned with it on screen (the
+//   present  decoded -> the viewer's present call returned with it (the
 //            compositor and the display add their own time after that)
 //
 // The server's times are on its own clock: Ping / Pong give the round trip
@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-namespace broremote::view {
+namespace broremote {
 
 using Clock = std::chrono::steady_clock;
 
@@ -54,6 +54,24 @@ struct Probe {
     double queue = 0, encode = 0, wait = 0, net = 0, dwait = 0, decode = 0, present = 0;
     double rtt = 0;             // the round trip when it was sent
 };
+
+// The probe's answer in a picture: `broremote serve-test --latency` draws the
+// count of presses it has received as 32 one-bit blocks (white = 1, most
+// significant first) of kMarkerBlock pixels in block row kMarkerRow, from
+// x = 3 * kMarkerBlock. A viewer reads the 32 blocks' centres.
+inline constexpr uint32_t kMarkerBlock = 16;
+inline constexpr uint32_t kMarkerRow = 1;
+inline constexpr uint32_t kMarkerBits = 32;
+// The centre of bit i (0: the most significant), in picture pixels.
+inline void marker_point(uint32_t i, uint32_t& x, uint32_t& y) {
+    x = (3 + i) * kMarkerBlock + kMarkerBlock / 2;
+    y = kMarkerRow * kMarkerBlock + kMarkerBlock / 2;
+}
+// The marker from the 32 centres' luma (0..255, either range: 128 splits it).
+int64_t marker_from_luma(const uint8_t (&luma)[kMarkerBits]);
+// Read straight from a CPU picture (luma for NV12, the RGB mean for RGBA8 /
+// BGRA8); -1 for a picture too small to hold it or not in CPU memory.
+int64_t read_marker(const DecodedFrame& picture);
 
 class LatencyTracker {
 public:
@@ -119,4 +137,4 @@ private:
     uint64_t lost_ = 0;
 };
 
-}  // namespace broremote::view
+}  // namespace broremote

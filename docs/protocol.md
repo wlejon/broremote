@@ -1,4 +1,4 @@
-# broremote wire protocol, version 1.3
+# broremote wire protocol, version 1.4
 
 A viewer and a broremote server talk over byte streams: a control connection, and from 1.2 optionally further connections (lanes, below) that join its session. Locally each is a connection to the server's local address: an AF_UNIX stream socket on Linux and macOS, a named pipe on Windows. Remotely each is the stdio of its own `ssh host broremote proxy`, which relays bytes to the remote host's local address without reading them. The protocol is the same in every case, and nothing in it depends on the transport. The transport (local listener and connector, peer checks, spawned streams, the proxy relay, lane grants) is the brolink sibling's.
 
@@ -132,9 +132,12 @@ InputEvent := u8 kind, then by kind:
   2 PointerMotion  f32 x, f32 y   -- absolute, in stream pixels; must be finite
   3 Button         varint code (32-bit; evdev BTN_*), bool pressed
   4 Wheel          svarint dx, svarint dy (32-bit each) -- 120ths of a detent; +x right, +y down
+  5 RelativeMotion f32 dx, f32 dy -- (1.4) a device delta in stream pixels; must be finite
 ```
 
 Input is in the server's terms, so the host injects it as if it came from its own devices: the viewer maps its platform's keys to evdev and scales its window to stream pixels. On focus loss the viewer releases every key and button it pressed.
+
+`RelativeMotion` (1.4) is what a viewer sends while the host's pointer is locked (the `Cursor` message's `locked`, below): a game or any client holding `zwp_pointer_constraints_v1`'s lock reads only motion, and the position stays put. A viewer sends it only to a server whose `Welcome` says minor >= 4; an older one would ignore the kind.
 
 ## Messages: server to client (0x02xx)
 
@@ -143,7 +146,7 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 | 0x0201 | Welcome | `u16 major`, `u16 minor`, `str server_name` (at most 256 bytes); 1.2 appends the lane grant: `varint session`, `u8[32] token` |
 | 0x0202 | StreamConfig | `varint stream_id`, `u8 codec`, `varint width`, `varint height` (1..16384 each), `varint fps` (a hint) |
 | 0x0203 | Video | `varint stream_id`, `varint frame_id`, `svarint pts_ns`, `u8 flags` (bit 0 keyframe; other bits ignored), `bytes bitstream`; 1.1 appends `varint submit_us`, `varint queue_us`, `varint encode_us` (below) |
-| 0x0204 | Cursor | `bool visible`, `svarint x`, `svarint y` (32-bit, stream pixels), `varint hotspot_x`, `varint hotspot_y`, `str shape` (a CSS cursor name, at most 64 bytes) |
+| 0x0204 | Cursor | `bool visible`, `svarint x`, `svarint y` (32-bit, stream pixels), `varint hotspot_x`, `varint hotspot_y`, `str shape` (a CSS cursor name, at most 64 bytes); 1.4 appends `bool locked` (the pointer is locked: send `RelativeMotion`, hide the local pointer) |
 | 0x0205 | Error | `u16 code`, `str message` (at most 4096 bytes) |
 | 0x0206 | Pong (1.1) | `u64 token` (the Ping's), `u64 server_time_us` (the server's monotonic clock when it answered) |
 | 0x0207 | FrameSent (1.1) | `varint frame_id`, `varint wait_us`, `varint write_us` |

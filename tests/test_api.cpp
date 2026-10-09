@@ -173,6 +173,106 @@ int main() {
                  " bro.remote.off('detach', f); } n"),
              std::string("0"));
 
+    check::phase("connect: option errors");
+    CHECK_EQ(run("typeof bro.remote.connect"), std::string("function"));
+    CHECK_EQ(run("(() => { try { bro.remote.connect({socket: '../x'}); return 'no' } catch (e) { "
+                 "return e instanceof TypeError && e.message.startsWith('bro.remote.connect:') ? 'ok' : e.message } })()"),
+             std::string("ok"));
+    CHECK_EQ(run("(() => { try { bro.remote.connect({audio: 1}); return 'no' } catch (e) { "
+                 "return e instanceof TypeError ? 'ok' : e.message } })()"),
+             std::string("ok"));
+
+    check::phase("connect: a session to an in-process server");
+    struct ViewerLog {
+        std::vector<ViewerSession*> starting, gone;
+        brovideo::PictureMemory output = brovideo::PictureMemory::D3D11;
+        std::atomic<int> prepared{0};
+    };
+    static ViewerLog vlog;
+    {
+        api::ViewerHooks vh;
+        vh.sessionStarting = [](ViewerSession* s, ViewerOptions& o) {
+            vlog.starting.push_back(s);
+            o.output = vlog.output;  // CPU pictures (Raw has no other kind)
+            o.prepare = [](DecodedFrame&) { ++vlog.prepared; };
+        };
+        vh.sessionGone = [](ViewerSession* s) { vlog.gone.push_back(s); };
+        api::setViewerHooks(vh);
+    }
+    vlog.output = brovideo::PictureMemory::Cpu;
+    const std::string vsock = unique_socket();
+    std::unique_ptr<Server> vserver;
+    {
+        ServerConfig cfg;
+        cfg.socket_name = vsock;
+        cfg.codecs = {Codec::Raw};
+        cfg.audio.enabled = false;
+        std::string err;
+        vserver = Server::create(cfg, &err);
+        CHECK(vserver != nullptr);
+    }
+    run("globalThis.vs = bro.remote.connect({socket: '" + vsock + "', audio: false, name: 'api-test'});"
+        "globalThis.vev = []; vs.on('state', e => vev.push(e.state)); vs.onconfig = e => vev.push('config:' + "
+        "e.width + 'x' + e.height);");
+    CHECK_EQ(vlog.starting.size(), size_t(1));
+    CHECK_EQ(run("vs.target"), "socket " + vsock);
+    WAIT((api::tickRemote(), run("vs.status().state") == "connected"), 5000);
+    WAIT(vserver->client_count() == 1, 5000);
+    {
+        ev::CallResult r = bronze::eval::evalScript("vs");
+        CHECK(!r.thrown && api::viewerSession(r.value) == vlog.starting[0]);
+        ev::CallResult other = bronze::eval::evalScript("({id: vs.id})");
+        CHECK(!other.thrown && api::viewerSession(other.value) == nullptr);
+    }
+    std::vector<uint8_t> vpixels(64 * 32 * 4, 0x40);
+    for (int i = 0; i < 3; ++i) {
+        Frame f;
+        f.width = 64;
+        f.height = 32;
+        f.cpu = vpixels.data();
+        vserver->submit(f, [] {});
+        WAIT(run("vs.stats().decoded >= " + std::to_string(i + 1)) == "true", 5000);
+    }
+    WAIT((api::tickRemote(), run("vev.join()") == "connected,config:64x32"), 5000);
+    CHECK_EQ(run("vev.join()"), std::string("connected,config:64x32"));
+    CHECK_EQ(run("const vt = vs.status(); [vt.codec, vt.width, vt.height, vt.server, vt.protocol, vt.inputLane].join()"),
+             std::string("raw,64,32,broremote,1.4,true"));
+    CHECK(vlog.prepared.load() >= 3);
+    run("vs.sendInput({kind: 'key', code: 30, pressed: true}); vs.sendInput({kind: 'relative', x: 2, y: -1});");
+    {
+        std::vector<InputEvent> got;
+        WAIT((vserver->drain_input(got), got.size() >= 2), 5000);
+        CHECK(got.size() >= 2 && got[0] == InputEvent::key(30, true) && got[1] == InputEvent::relative(2, -1));
+    }
+    CHECK_EQ(run("(() => { try { vs.sendInput({kind: 'jump'}); return 'no' } catch (e) { return e instanceof "
+                 "TypeError ? 'ok' : 'x' } })()"),
+             std::string("ok"));
+    CHECK_EQ(run("vs.audio()"), std::string("?"));  // null: no audio lane
+    {
+        CursorState c;
+        c.x = 5;
+        c.y = 6;
+        c.shape = "text";
+        c.locked = true;
+        vserver->set_cursor(c);
+    }
+    WAIT(run("(vs.status().cursor || {}).shape") == "text", 5000);
+    CHECK_EQ(run("const vc = vs.status().cursor; [vc.x, vc.y, vc.locked].join()"), std::string("5,6,true"));
+
+    check::phase("connect: the server goes, close");
+    vserver.reset();
+    WAIT((api::tickRemote(), run("vev.join()") == "connected,config:64x32,closed"), 5000);
+    CHECK_EQ(run("vs.close()"), std::string("true"));
+    CHECK_EQ(vlog.gone.size(), size_t(1));
+    CHECK_EQ(run("vs.close()"), std::string("false"));
+    CHECK_EQ(run("vs.status().state"), std::string("closed"));
+
+    check::phase("connect: nothing listening, and shutdown closes sessions");
+    run("globalThis.vn = bro.remote.connect({socket: '" + unique_socket() + "', audio: false});");
+    WAIT((api::tickRemote(), run("vn.status().state") == "closed"), 5000);
+    CHECK_EQ(run("vn.status().failed"), std::string("true"));
+    run("globalThis.vk = bro.remote.connect({socket: '" + unique_socket() + "', audio: false});");
+
     check::phase("shutdownRemote");
     run("bro.remote.host({socket: '" + sock + "', codecs: ['raw']})");
     CHECK(api::activeServer() != nullptr);
@@ -180,6 +280,7 @@ int main() {
     CHECK(api::activeServer() == nullptr);
     CHECK_EQ(g_log.calls.size(), size_t(6));
     CHECK(!g_log.calls.back());
+    CHECK_EQ(vlog.gone.size(), size_t(3));  // vs (closed above), vn and vk
 
     return check::finish();
 }

@@ -88,7 +88,8 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(a, "--mic-file") && has) {
             o.session.audio.mic_file = argv[++i];
         } else if (!std::strcmp(a, "--record-audio") && has) {
-            o.session.audio.record_file = argv[++i];
+            o.record_audio = argv[++i];
+            o.session.audio.record_seconds = 600;
         } else if (!std::strcmp(a, "--audio-buffer") && has) {
             if (!parse_uint(argv[++i], o.session.audio.jitter_ms) || o.session.audio.jitter_ms > 1000) return usage();
         } else if (!std::strcmp(a, "--fullscreen")) {

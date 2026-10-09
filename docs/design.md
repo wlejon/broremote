@@ -52,21 +52,28 @@ include/broremote/
                 endpoints for tests
   audio_client.h  the viewer's audio lane: AudioClient (the protocol) and
                 AudioSession (devices on both ends, latency)
+  connect.h     ConnectTarget: where a viewer connects (ssh HOST + socket, or
+                a local socket), and opening its streams and lanes
+  latency.h     LatencyTracker: where each frame's time goes; latency probes
+                and the input-marker row serve-test --latency draws
+  viewer.h      ViewerSession: a whole viewer with no window (connect, decode,
+                ping and audio threads); a display takes its newest picture
   api.h         the JavaScript binding's public header (forwards to src/api)
 src/            implementation (no platform pieces: those are brolink's)
 src/audio/      audio.cpp; device_pipewire.cpp (Linux), device_wasapi.cpp
                 (Windows), device_paced.cpp (paced endpoints; the fallback)
 src/server_audio.cpp  the host's side of the audio lanes
-src/api/        broremote_api, the bronze JavaScript binding (bro.remote)
+src/api/        broremote_api, the bronze JavaScript binding (bro.remote):
+                api.cpp (hosting), viewer_api.cpp (bro.remote.connect)
 tools/          broremote (CLI: proxy, serve-test, codecs, encode, record,
                 tone, wav-info, mic-check, audio-devices),
                 connect (the --ssh/--socket target, shared), test_pattern,
                 picture (decoded pictures to RGBA, PSNR)
-tools/view/     broremote-view: keymap (SDL scancode -> evdev), input_map,
-                session (connect + decode + ping threads), latency (where
-                each frame's time goes; latency probes), display_timing
-                (when a present reached the screen, from DXGI), viewer_app
-                (window, render loop), png, main
+tools/view/     broremote-view, the stopgap SDL viewer (bro's <remoteview>
+                and helmapps' helmremote replace it): keymap (SDL scancode
+                -> evdev), input_map, display_timing (when a present reached
+                the screen, from DXGI), viewer_app (window, render loop),
+                png, main; its session is the library's ViewerSession
 tests/          ctest suite
 ```
 
@@ -259,6 +266,10 @@ its own devices:
 - **Wheel:** horizontal and vertical, in 120ths of a detent (the Windows /
   libinput high-resolution unit), signed: +x right, +y down (libinput's
   sense; a viewer on Windows negates `WM_MOUSEWHEEL`).
+- **Relative motion (1.4):** a device delta in stream pixels, sent instead of
+  positions while the host's pointer is locked (`CursorState::locked`, from
+  1.4 the `Cursor` message's last field): a game holding a pointer lock
+  reads only motion. The viewer hides and holds its own pointer meanwhile.
 
 Text input/IME and clipboard are later minors. The server ignores an input
 kind it does not know (a newer minor's) instead of treating it as an error.
@@ -418,6 +429,40 @@ reader thread starts inside `connect()`, and a `StreamConfig` or the first
 `Video` can arrive before `connect()` returns, so callbacks assigned later
 could miss them. For the same reason a handler that needs the `Client` (to
 ack, say) must not assume `connect()` has returned yet.
+
+### ViewerSession (viewer.h)
+
+A viewer of any kind, minus its window: `broremote-view` and bro's
+`<remoteview>` (through `bro.remote.connect`) both put their display and
+input around one. `start(ViewerOptions)` opens the target (`ConnectTarget`:
+`ssh HOST broremote proxy`, or a local socket) on a connect thread, then
+the Client; a decode thread decodes each packet, acks it, crops the picture
+to the stream's size and publishes it as the newest frame (`take_frame`
+swaps it out; pictures never taken are replaced, not queued); a ping thread
+keeps the round trip and clock offset; the audio lane comes up once video
+is. `status()`, `stats()`, `cursor()`, `send_input()`, `probe()` /
+`latency()` (the latency tracker), the audio lane's stats and mutes.
+
+What the display needs is in the options: `output` (where pictures should
+live: `PictureMemory::Cpu`, or `D3D11` to leave Media Foundation's pictures
+on the GPU), `prepare` (decode thread, each picture before it is published:
+bro converts a D3D11 picture into a texture Vulkan shares there, off its
+own thread, and lets go of the decoder's surface), `read_marker` (decode
+thread, while a latency probe is open: the input marker of a picture not
+in CPU memory; bro reads 32 luma samples through a tiny staging copy) and
+`log`.
+
+### The viewer in JavaScript (src/api/viewer_api.cpp)
+
+`bro.remote.connect(options)` makes a ViewerSession and returns its
+session object: `status()`, `stats()` (rates over the interval since the
+last call, and the latency tracker's means), `audio()`, `probe()` /
+`probes()`, `sendInput()`, mutes, `close()`, and `state` / `config` events
+(delivered by `tickRemote()`). The host shows it: `ViewerHooks`
+(`sessionStarting` sets the options above before the session starts,
+`sessionGone` comes just before one is destroyed, `wake` when a picture
+arrives) and `viewerSession(object)`, which finds the session an object
+stands for. bro's `<remoteview>` is that host (docs/remote-api.js).
 
 ### Codecs
 

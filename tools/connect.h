@@ -1,58 +1,21 @@
 #pragma once
-// Where a viewer-side tool connects: a local server socket, or a remote one
-// through `ssh -T HOST <command>` (the command defaults to `broremote
-// proxy`). Shared by `broremote record` and `broremote-view`.
+// The command-line half of where a viewer-side tool connects (the target
+// itself is the library's, broremote/connect.h). Shared by `broremote
+// record` and `broremote-view`.
 
-#include "broremote/stream.h"
-
-#include <functional>
-#include <memory>
-#include <string>
+#include "broremote/connect.h"
 
 namespace broremote::tools {
 
-struct ConnectTarget {
-    std::string ssh_host;                         // empty: a local socket
-    std::string ssh_command = "broremote proxy";  // run on the host by ssh
-    std::string socket = "default";               // the local socket's name
-    bool socket_given = false;                    // --socket was passed
-    bool command_given = false;                   // --ssh-command was passed
-    std::string ssh_program;                      // --ssh-program; empty: ssh_program() picks
-    // ssh -tt and `proxy --pty` (low delay: OpenSSH sets TCP_NODELAY only on
-    // a terminal session), or -T and a plain pipe (--ssh-no-pty).
-    bool pty = false;
-    // Input on a lane of its own (protocol 1.2): a second connection opened
-    // the same way as the first (a second ssh with --ssh). --no-input-lane
-    // sends input on the control connection instead.
-    bool input_lane = true;
-
-    [[nodiscard]] bool remote() const { return !ssh_host.empty(); }
-    // "halo" or "socket default", for titles and messages.
-    [[nodiscard]] std::string describe() const;
-};
+using broremote::ConnectTarget;
+using broremote::input_lane_opener;
+using broremote::open_stream;
+using broremote::remote_command;
+using broremote::ssh_program;
 
 // Consumes --ssh HOST, --ssh-command CMD, --socket NAME, --ssh-program P,
 // --ssh-pty, --ssh-no-pty or --no-input-lane at argv[i]
 // (advancing i past the value). False when argv[i] is none of them.
 bool parse_connect_arg(int argc, char** argv, int& i, ConnectTarget& t);
-
-// The ssh to run: --ssh-program, else $BROREMOTE_SSH, else on Windows the
-// system's own OpenSSH (%SystemRoot%\System32\OpenSSH\ssh.exe) when it is
-// there, else `ssh` from PATH. On Windows the PATH's ssh is often Git's
-// MSYS build, whose emulated select() on pipes holds each small write from
-// the viewer for up to a timer tick: measured from this viewer, a 5 ms mean
-// and 15 ms worst round trip against 0.7 / 1.5 ms for the system's.
-std::string ssh_program(const ConnectTarget& t);
-
-// With --ssh and --socket together, the socket name goes to the remote
-// proxy (unless --ssh-command was given, which is used as it is).
-std::string remote_command(const ConnectTarget& t);
-
-// The stream: ssh's stdio, or the local socket. Null with *err on failure.
-std::unique_ptr<Stream> open_stream(const ConnectTarget& t, std::string* err);
-
-// ClientOptions::open_input_lane for `t`: another open_stream(t), or empty
-// with --no-input-lane.
-std::function<std::unique_ptr<Stream>(std::string*)> input_lane_opener(const ConnectTarget& t);
 
 }  // namespace broremote::tools

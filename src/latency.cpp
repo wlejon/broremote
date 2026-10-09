@@ -1,8 +1,8 @@
-#include "latency.h"
+#include "broremote/latency.h"
 
 #include <algorithm>
 
-namespace broremote::view {
+namespace broremote {
 
 namespace {
 
@@ -17,6 +17,29 @@ double us_of(Clock::time_point t) {
 double ms(Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); }
 
 }  // namespace
+
+int64_t marker_from_luma(const uint8_t (&luma)[kMarkerBits]) {
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < kMarkerBits; ++i) v = (v << 1) | (luma[i] >= 128 ? 1u : 0u);
+    return int64_t(v);
+}
+
+int64_t read_marker(const DecodedFrame& f) {
+    if (f.memory != brovideo::PictureMemory::Cpu || f.data.empty()) return -1;
+    if (f.width < (3 + kMarkerBits) * kMarkerBlock || f.height < (kMarkerRow + 1) * kMarkerBlock) return -1;
+    uint8_t luma[kMarkerBits];
+    for (uint32_t i = 0; i < kMarkerBits; ++i) {
+        uint32_t x = 0, y = 0;
+        marker_point(i, x, y);
+        if (f.format == PixelFormat::NV12) {
+            luma[i] = f.data[size_t(y) * f.stride + x];  // limited range: black 16, white 235
+        } else {
+            const uint8_t* p = f.data.data() + size_t(y) * f.stride + size_t(x) * 4;
+            luma[i] = uint8_t((p[0] + p[1] + p[2]) / 3);
+        }
+    }
+    return marker_from_luma(luma);
+}
 
 void LatencyTracker::on_pong(Clock::time_point sent, Clock::time_point received, uint64_t server_us) {
     if (received < sent) return;
@@ -202,4 +225,4 @@ LatencyWindow LatencyTracker::take_window() {
     return w;
 }
 
-}  // namespace broremote::view
+}  // namespace broremote

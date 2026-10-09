@@ -34,6 +34,7 @@ enum class InputKind : uint8_t {
     PointerMotion = 2,  // x, y: absolute position in stream pixels
     Button = 3,         // code: evdev BTN_*; pressed
     Wheel = 4,          // wheel_x, wheel_y: 120ths of a detent; +x right, +y down (libinput's sense)
+    RelativeMotion = 5, // 1.4: x, y: a device delta in stream pixels, for a host whose pointer is locked
 };
 
 struct InputEvent {
@@ -66,6 +67,13 @@ struct InputEvent {
         e.pressed = pressed;
         return e;
     }
+    static InputEvent relative(float dx, float dy) {
+        InputEvent e;
+        e.kind = InputKind::RelativeMotion;
+        e.x = dx;
+        e.y = dy;
+        return e;
+    }
     static InputEvent wheel(int32_t dx, int32_t dy) {
         InputEvent e;
         e.kind = InputKind::Wheel;
@@ -85,6 +93,10 @@ struct CursorState {
     uint32_t hotspot_x = 0;
     uint32_t hotspot_y = 0;
     std::string shape = "default";  // CSS cursor name; the image itself is a later minor
+    // 1.4: a client on the host holds the pointer locked (pointer lock,
+    // zwp_pointer_constraints_v1): the position stays put and only relative
+    // motion moves anything, so a viewer sends RelativeMotion while it is set.
+    bool locked = false;
     bool operator==(const CursorState&) const = default;
 };
 

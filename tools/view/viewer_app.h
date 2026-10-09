@@ -20,7 +20,8 @@ namespace broremote::view {
 
 struct ViewerOptions {
     SessionOptions session;
-    uint32_t frames = 0;        // exit after this many pictures were displayed (0: until closed)
+    std::string record_audio;   // write what the speakers played here on exit
+    uint32_t frames = 0;       // exit after this many pictures were displayed (0: until closed)
     double timeout_s = 0;       // with frames: give up (exit 1) after this long (0: never)
     std::string dump_png;       // write the last displayed picture here on exit
     bool check_pattern = false; // compare the last picture with broremote serve-test's pattern

@@ -136,6 +136,7 @@ std::string show(const InputEvent& e) {
             break;
         case InputKind::PointerMotion: std::snprintf(buf, sizeof buf, "motion %.2f,%.2f", e.x, e.y); break;
         case InputKind::Wheel: std::snprintf(buf, sizeof buf, "wheel %d,%d", e.wheel_x, e.wheel_y); break;
+        case InputKind::RelativeMotion: std::snprintf(buf, sizeof buf, "relative %.2f,%.2f", e.x, e.y); break;
     }
     return buf;
 }

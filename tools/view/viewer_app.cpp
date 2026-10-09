@@ -27,7 +27,11 @@ double mean(const std::vector<double>& v) {
 
 }  // namespace
 
-Viewer::Viewer(ViewerOptions options) : opt_(std::move(options)) {}
+Viewer::Viewer(ViewerOptions options) : opt_(std::move(options)) {
+    if (!opt_.session.log) {
+        opt_.session.log = [](const std::string& line) { std::fprintf(stderr, "broremote-view: %s\n", line.c_str()); };
+    }
+}
 
 Viewer::~Viewer() {
     session_.reset();  // joins its threads; their wake events go nowhere after this
@@ -445,14 +449,14 @@ void Viewer::audio_report() {
         const audio::ToneAnalysis t = audio::analyze(rec.data() + (rec.size() - n), n, 1, rate);
         std::fprintf(stderr, "  host audio heard: %.2f s; the last second %.1f dBFS, peak %.3f, dominant %.1f Hz\n",
                      double(rec.size()) / rate, t.rms_dbfs, t.peak, t.frequency_hz);
-        if (!opt_.session.audio.record_file.empty()) {
+        if (!opt_.record_audio.empty()) {
             audio::WavData w;
             w.rate = rate;
             w.channels = 1;
             w.frames = std::move(rec);
             std::string err;
-            if (audio::write_wav(opt_.session.audio.record_file, w, &err)) {
-                std::fprintf(stderr, "  wrote %s\n", opt_.session.audio.record_file.c_str());
+            if (audio::write_wav(opt_.record_audio, w, &err)) {
+                std::fprintf(stderr, "  wrote %s\n", opt_.record_audio.c_str());
             } else {
                 std::fprintf(stderr, "  --record-audio: %s\n", err.c_str());
             }

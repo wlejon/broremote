@@ -107,6 +107,7 @@ const char* kind_name(InputKind k) {
         case InputKind::PointerMotion: return "motion";
         case InputKind::Button: return "button";
         case InputKind::Wheel: return "wheel";
+        case InputKind::RelativeMotion: return "relative motion";
     }
     return "?";
 }

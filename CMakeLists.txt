@@ -53,6 +53,9 @@ set(BROREMOTE_SOURCES
     src/server_io.cpp
     src/server_encode.cpp
     src/client.cpp
+    src/connect.cpp
+    src/latency.cpp
+    src/viewer.cpp
     src/proxy.cpp
     src/server_audio.cpp
     src/audio_client.cpp
@@ -190,8 +193,6 @@ if(BROREMOTE_BUILD_VIEWER)
     add_library(broremote_view_core STATIC
         tools/view/keymap.cpp
         tools/view/input_map.cpp
-        tools/view/session.cpp
-        tools/view/latency.cpp
         tools/view/display_timing.cpp
         tools/view/viewer_app.cpp
         tools/view/png.cpp

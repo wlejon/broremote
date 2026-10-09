@@ -1,5 +1,7 @@
 #include "test_pattern.h"
 
+#include <cstddef>
+
 namespace broremote::tools {
 
 namespace {

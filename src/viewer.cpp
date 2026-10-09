@@ -1,16 +1,13 @@
-#include "session.h"
-
-#include "picture.h"
-#include "test_pattern.h"
+#include "broremote/viewer.h"
 
 #include <algorithm>
 #include <cstdio>
 
-namespace broremote::view {
+namespace broremote {
 
 namespace {
 
-// A stream owned jointly by the Client and the Session, so the Session can
+// A stream owned jointly by the Client and the session, so the session can
 // shut it down (to abandon a connect in progress) and read ssh's stderr
 // after the Client is gone, without racing the Client's own lifetime.
 class SharedStream final : public Stream {
@@ -33,9 +30,9 @@ std::string codec_list(const std::vector<Codec>& v) {
 
 }  // namespace
 
-Session::Session(std::function<void()> wake) : wake_(std::move(wake)) {}
+ViewerSession::ViewerSession(std::function<void()> wake) : wake_(std::move(wake)) {}
 
-Session::~Session() {
+ViewerSession::~ViewerSession() {
     std::shared_ptr<Stream> stream, audio_stream;
     {
         std::lock_guard<std::mutex> lk(m_);
@@ -56,25 +53,40 @@ Session::~Session() {
     }
     if (audio_stream) audio_stream->shutdown();
     if (audio_thread_.joinable()) audio_thread_.join();
-    audio_.reset();
+    std::unique_ptr<AudioSession> audio;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        audio = std::move(audio_);
+    }
+    audio.reset();
     if (decoder_thread_.joinable()) decoder_thread_.join();
     if (pinger_.joinable()) pinger_.join();
     client_.reset();  // joins the reader (on_closed takes m_, so not under it)
 }
 
-void Session::start(const SessionOptions& options) {
+void ViewerSession::say(const std::string& line) const {
+    if (options_.log) options_.log(line);
+}
+
+void ViewerSession::start(const ViewerOptions& options) {
+    options_ = options;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        want_mic_muted_ = options.audio.mic_muted;
+        want_playback_muted_ = options.audio.playback_muted;
+    }
     connector_ = std::thread([this, options] { connect_thread(options); });
     decoder_thread_ = std::thread([this] { decode_thread(); });
     pinger_ = std::thread([this] { ping_thread(); });
 }
 
 // The round trip and the clock offset, four times a second while connected.
-void Session::ping_thread() {
+void ViewerSession::ping_thread() {
     std::unique_lock<std::mutex> lk(m_);
     for (;;) {
         cv_.wait_for(lk, std::chrono::milliseconds(250),
-                     [&] { return stopping_ || status_.state == SessionState::Closed; });
-        if (stopping_ || status_.state == SessionState::Closed) return;
+                     [&] { return stopping_ || status_.state == ViewerState::Closed; });
+        if (stopping_ || status_.state == ViewerState::Closed) return;
         Client* c = live_;
         if (!c) continue;
         lk.unlock();
@@ -83,28 +95,23 @@ void Session::ping_thread() {
     }
 }
 
-bool Session::probe() {
+bool ViewerSession::probe() {
     Client* c = nullptr;
     {
         std::lock_guard<std::mutex> lk(m_);
-        if (status_.state != SessionState::Connected) return false;
+        if (status_.state != ViewerState::Connected) return false;
         c = live_;
     }
     if (!c) return false;
     latency_.set_probing(true);
     if (!latency_.begin_probe(Clock::now())) return false;
     constexpr uint32_t kKeyF13 = 183;  // evdev KEY_F13: nothing a desktop binds
-    InputEvent e;
-    e.kind = InputKind::Key;
-    e.code = kKeyF13;
-    e.pressed = true;
-    c->send_input(e);
-    e.pressed = false;
-    c->send_input(e);
+    c->send_input(InputEvent::key(kKeyF13, true));
+    c->send_input(InputEvent::key(kKeyF13, false));
     return true;
 }
 
-void Session::close() {
+void ViewerSession::close() {
     Client* c = nullptr;
     std::shared_ptr<Stream> stream;
     {
@@ -117,7 +124,7 @@ void Session::close() {
     else if (stream) stream->shutdown();
 }
 
-void Session::set_status(const std::function<void(SessionStatus&)>& f) {
+void ViewerSession::set_status(const std::function<void(ViewerStatus&)>& f) {
     {
         std::lock_guard<std::mutex> lk(m_);
         f(status_);
@@ -125,22 +132,28 @@ void Session::set_status(const std::function<void(SessionStatus&)>& f) {
     if (wake_) wake_();
 }
 
-SessionStatus Session::status() const {
+ViewerStatus ViewerSession::status() const {
     std::lock_guard<std::mutex> lk(m_);
     return status_;
 }
 
-void Session::connect_thread(SessionOptions options) {
+uint64_t ViewerSession::cursor(CursorState& out) const {
+    std::lock_guard<std::mutex> lk(m_);
+    out = cursor_;
+    return cursor_changes_;
+}
+
+void ViewerSession::connect_thread(ViewerOptions options) {
     const std::string where = options.target.describe();
     {
         std::lock_guard<std::mutex> lk(m_);
         where_ = where;
     }
     std::string err;
-    std::unique_ptr<Stream> opened = tools::open_stream(options.target, &err);
+    std::unique_ptr<Stream> opened = open_stream(options.target, &err);
     if (!opened) {
-        set_status([&](SessionStatus& s) {
-            s.state = SessionState::Closed;
+        set_status([&](ViewerStatus& s) {
+            s.state = ViewerState::Closed;
             s.failed = true;
             s.message = "cannot connect to " + where + ": " + err;
         });
@@ -160,7 +173,7 @@ void Session::connect_thread(SessionOptions options) {
     const std::vector<Codec> decoders = brovideo::codecs(brovideo::Direction::Decode);
     if (options.negotiate) co.codecs = decoders;
     // Input on a lane of its own: a second connection opened like the first.
-    co.open_input_lane = tools::input_lane_opener(options.target);
+    co.open_input_lane = input_lane_opener(options.target);
 
     ClientHandlers h;
     h.on_config = [this](const StreamConfig& sc) {
@@ -185,14 +198,14 @@ void Session::connect_thread(SessionOptions options) {
         queue_.push_back(std::move(it));
         cv_.notify_all();
     };
-    h.on_cursor = [last = CursorState{}, first = true](const CursorState& c) mutable {
-        // Logged for now (the pointer is drawn locally by the OS).
-        if (first || c.shape != last.shape || c.visible != last.visible) {
-            std::fprintf(stderr, "broremote-view: server cursor %s%s\n", c.shape.c_str(),
-                         c.visible ? "" : " (hidden)");
+    h.on_cursor = [this](const CursorState& c) {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (cursor_changes_ && c == cursor_) return;
+            cursor_ = c;
+            ++cursor_changes_;
         }
-        first = false;
-        last = c;
+        if (wake_) wake_();
     };
     h.on_error = [this, decoders](ErrorCode code, const std::string& msg) {
         if (code == ErrorCode::ServerShutdown) {
@@ -208,8 +221,8 @@ void Session::connect_thread(SessionOptions options) {
 
     std::unique_ptr<Client> c = Client::connect(std::make_unique<SharedStream>(shared), std::move(h), co, &err);
     if (!c) {
-        set_status([&](SessionStatus& s) {
-            s.state = SessionState::Closed;
+        set_status([&](ViewerStatus& s) {
+            s.state = ViewerState::Closed;
             s.failed = !user_closed_;
             s.message = user_closed_ ? "closed" : "cannot connect to " + where + ": " + err;
         });
@@ -223,14 +236,11 @@ void Session::connect_thread(SessionOptions options) {
             client_ = std::move(c);
             live_ = client_.get();
             status_.server = client_->welcome().name;
-            if (client_->input_lane()) {
-                std::fprintf(stderr, "broremote-view: input on its own lane\n");
-            } else if (!client_->input_lane_error().empty()) {
-                std::fprintf(stderr, "broremote-view: input on the control connection: %s\n",
-                             client_->input_lane_error().c_str());
-            }
+            status_.server_minor = client_->welcome().minor;
+            status_.input_lane = client_->input_lane();
+            status_.input_lane_error = client_->input_lane_error();
             // The connection may already have ended (on_closed ran).
-            if (status_.state == SessionState::Connecting) status_.state = SessionState::Connected;
+            if (status_.state == ViewerState::Connecting) status_.state = ViewerState::Connected;
         }
     }
     cv_.notify_all();
@@ -238,14 +248,19 @@ void Session::connect_thread(SessionOptions options) {
         c.reset();
         return;
     }
+    if (live_->input_lane()) {
+        say("input on its own lane");
+    } else if (!live_->input_lane_error().empty()) {
+        say("input on the control connection: " + live_->input_lane_error());
+    }
     if (user_closed_) live_->close();
     if (wake_) wake_();
     // The audio lane comes up on its own thread, so video never waits for it.
     if (options.audio.enabled) {
         const std::optional<brolink::lanes::Grant> grant = live_->welcome().grant;
         if (!grant || live_->welcome().minor < 3) {
-            std::fprintf(stderr, "broremote-view: no audio: the server speaks protocol %u.%u (audio is 1.3)\n",
-                         live_->welcome().major, live_->welcome().minor);
+            say("no audio: the server speaks protocol " + std::to_string(live_->welcome().major) + "." +
+                std::to_string(live_->welcome().minor) + " (audio is 1.3)");
         } else {
             std::lock_guard<std::mutex> lk(m_);
             if (!stopping_) audio_thread_ = std::thread([this, options, g = *grant] { audio_thread(options, g); });
@@ -253,8 +268,8 @@ void Session::connect_thread(SessionOptions options) {
     }
 }
 
-void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) {
-    const AudioOptions& ao = options.audio;
+void ViewerSession::audio_thread(ViewerOptions options, brolink::lanes::Grant grant) {
+    const ViewerAudioOptions& ao = options.audio;
     AudioSessionOptions o;
     o.lane.mic = ao.mic;
     o.lane.playback = ao.playback;
@@ -266,7 +281,7 @@ void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) 
         audio::WavData wav;
         std::string err;
         if (!audio::read_wav(ao.mic_file, wav, &err)) {
-            std::fprintf(stderr, "broremote-view: --mic-file: %s; no mic\n", err.c_str());
+            say("mic file: " + err + "; no mic");
             o.lane.mic = false;
         } else {
             // Mono at the file's own rate: the host's node converts the rate.
@@ -286,12 +301,11 @@ void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) 
         mic_tone_ = std::make_unique<audio::Tone>(ao.mic_tone_hz, 0.5, o.lane.mic_format.rate, 1);
         o.mic_generator = [this](float* out, uint32_t frames) { mic_tone_->fill(out, frames); };
     }
-    {
-        // Always kept (a minute; ten with --record-audio), for the closing report.
+    if (ao.record_seconds > 0) {
         auto rec = std::make_unique<Recording>();
         rec->rate = o.lane.playback_format.rate;
         rec->channels = o.lane.playback_format.channels;
-        rec->frames.resize(size_t(rec->rate) * (ao.record_file.empty() ? 60 : 600));
+        rec->frames.resize(size_t(rec->rate) * ao.record_seconds);
         Recording* r = rec.get();
         o.on_played = [r](const float* f, uint32_t n, int64_t) {
             const size_t at = r->used.load(std::memory_order_relaxed);
@@ -303,9 +317,9 @@ void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) 
     }
 
     std::string err;
-    std::unique_ptr<Stream> opened = tools::open_stream(options.target, &err);
+    std::unique_ptr<Stream> opened = open_stream(options.target, &err);
     if (!opened) {
-        std::fprintf(stderr, "broremote-view: no audio: cannot open the audio lane: %s\n", err.c_str());
+        say("no audio: cannot open the audio lane: " + err);
         return;
     }
     std::shared_ptr<Stream> shared(std::move(opened));
@@ -316,50 +330,60 @@ void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) 
     }
     std::unique_ptr<AudioSession> a = AudioSession::start(std::make_unique<SharedStream>(shared), grant, o, &err);
     if (!a) {
-        std::fprintf(stderr, "broremote-view: no audio: %s\n", err.c_str());
+        say("no audio: " + err);
         return;
     }
     const AudioSession::Stats st = a->stats();
-    std::fprintf(stderr, "broremote-view: audio lane: mic %s%s%s, host audio %s%s%s\n",
-                 st.mic ? "-> " : "off", st.mic ? st.mic_node.c_str() : "",
-                 st.mic ? (" (from " + (st.mic_device.empty() ? std::string("?") : st.mic_device) +
-                           (st.echo_cancel ? ", echo cancelled)" : ")"))
-                              .c_str()
-                        : "",
-                 st.playback ? "-> " : "off", st.playback ? st.speaker_device.c_str() : "",
-                 st.notes.empty() ? "" : (" [" + st.notes + "]").c_str());
-    std::lock_guard<std::mutex> lk(m_);
-    if (!stopping_) audio_ = std::move(a);
+    std::string line = "audio lane: mic ";
+    if (st.mic) {
+        line += "-> " + st.mic_node + " (from " + (st.mic_device.empty() ? std::string("?") : st.mic_device) +
+                (st.echo_cancel ? ", echo cancelled)" : ")");
+    } else {
+        line += "off";
+    }
+    line += ", host audio " + (st.playback ? "-> " + st.speaker_device : std::string("off"));
+    if (!st.notes.empty()) line += " [" + st.notes + "]";
+    say(line);
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (stopping_) return;
+        a->set_mic_muted(want_mic_muted_);
+        a->set_playback_muted(want_playback_muted_);
+        audio_ = std::move(a);
+    }
+    if (wake_) wake_();
 }
 
-bool Session::audio_stats(AudioSession::Stats& out) const {
+bool ViewerSession::audio_stats(AudioSession::Stats& out) const {
     std::lock_guard<std::mutex> lk(m_);
     if (!audio_) return false;
     out = audio_->stats();
     return true;
 }
 
-void Session::toggle_mic_mute() {
+void ViewerSession::set_mic_muted(bool muted) {
     std::lock_guard<std::mutex> lk(m_);
-    if (audio_) audio_->set_mic_muted(!audio_->mic_muted());
+    want_mic_muted_ = muted;
+    if (audio_) audio_->set_mic_muted(muted);
 }
 
-void Session::toggle_playback_mute() {
+void ViewerSession::set_playback_muted(bool muted) {
     std::lock_guard<std::mutex> lk(m_);
-    if (audio_) audio_->set_playback_muted(!audio_->playback_muted());
+    want_playback_muted_ = muted;
+    if (audio_) audio_->set_playback_muted(muted);
 }
 
-bool Session::mic_muted() const {
+bool ViewerSession::mic_muted() const {
     std::lock_guard<std::mutex> lk(m_);
-    return audio_ && audio_->mic_muted();
+    return audio_ ? audio_->mic_muted() : want_mic_muted_;
 }
 
-bool Session::playback_muted() const {
+bool ViewerSession::playback_muted() const {
     std::lock_guard<std::mutex> lk(m_);
-    return audio_ && audio_->playback_muted();
+    return audio_ ? audio_->playback_muted() : want_playback_muted_;
 }
 
-void Session::recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_t& channels) const {
+void ViewerSession::recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_t& channels) const {
     rate = channels = 0;
     frames.clear();
     if (!recording_) return;
@@ -369,7 +393,7 @@ void Session::recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_
     channels = 1;
 }
 
-void Session::on_closed(const std::string& why) {
+void ViewerSession::on_closed(const std::string& why) {
     std::shared_ptr<Stream> stream;
     bool user = false;
     {
@@ -383,8 +407,8 @@ void Session::on_closed(const std::string& why) {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         diag = stream->diagnostics();
     }
-    set_status([&](SessionStatus& s) {
-        s.state = SessionState::Closed;
+    set_status([&](ViewerStatus& s) {
+        s.state = ViewerState::Closed;
         if (user) {
             s.message = "closed";
             s.failed = false;
@@ -399,16 +423,16 @@ void Session::on_closed(const std::string& why) {
     cv_.notify_all();
 }
 
-void Session::decode_thread() {
+void ViewerSession::decode_thread() {
     for (;;) {
         Item item;
         Client* client = nullptr;
         {
             std::unique_lock<std::mutex> lk(m_);
             cv_.wait(lk, [&] {
-                return stopping_ || status_.state == SessionState::Closed || (live_ && !queue_.empty());
+                return stopping_ || status_.state == ViewerState::Closed || (live_ && !queue_.empty());
             });
-            if (stopping_ || status_.state == SessionState::Closed) return;
+            if (stopping_ || status_.state == ViewerState::Closed) return;
             item = std::move(queue_.front());
             queue_.pop_front();
             client = live_;
@@ -417,17 +441,18 @@ void Session::decode_thread() {
     }
 }
 
-void Session::decode_one(Item& item, Client& client) {
+void ViewerSession::decode_one(Item& item, Client& client) {
     std::string err;
     if (item.is_config) {
         config_ = item.config;
         if (!decoder_ || decoder_codec_ != config_.codec) {
             decoder_.reset();
             DecoderConfig dc;
-            dc.codec = config_.codec;  // hardware where it works, CPU pictures ($BROVIDEO_HARDWARE=0: software)
+            dc.codec = config_.codec;  // hardware where it works ($BROVIDEO_HARDWARE=0: software)
+            dc.output = options_.output;
             decoder_ = brovideo::create_decoder(dc, &err);
             if (!decoder_) {
-                set_status([&](SessionStatus& s) {
+                set_status([&](ViewerStatus& s) {
                     s.failed = true;
                     s.message = std::string("this machine cannot decode the server's ") + codec_name(config_.codec) +
                                 " stream: " + err;
@@ -439,10 +464,12 @@ void Session::decode_one(Item& item, Client& client) {
         }
         keyframe_requested_ = false;
         const std::string what = decoder_->describe();
-        set_status([&](SessionStatus& s) {
+        const bool hw = decoder_->hardware();
+        set_status([&](ViewerStatus& s) {
             s.have_config = true;
             s.config = config_;
             s.decoder = what.empty() ? codec_name(config_.codec) : what;
+            s.hardware = hw;
         });
         return;
     }
@@ -471,7 +498,7 @@ void Session::decode_one(Item& item, Client& client) {
             failures = ++stats_.failed;
             if (request) ++stats_.keyframe_requests;
         }
-        if (failures <= 10) std::fprintf(stderr, "broremote-view: frame %llu: %s\n", (unsigned long long)v.frame_id, err.c_str());
+        if (failures <= 10) say("frame " + std::to_string(v.frame_id) + ": " + err);
         if (request) {
             client.request_keyframe();
             keyframe_requested_ = true;
@@ -487,11 +514,15 @@ void Session::decode_one(Item& item, Client& client) {
         work_.width = std::min(work_.width, config_.width);
         work_.height = std::min(work_.height, config_.height);
     }
+    const bool gpu = work_.memory != brovideo::PictureMemory::Cpu;
     // While probing, the picture's input marker says which presses it answers.
-    const int64_t marker = latency_.probing()
-                               ? tools::read_block_row(work_, tools::kInputMarkerRow, tools::kPatternBlock)
-                               : -1;
-    latency_.on_decoded(v.frame_id, t0, t1, marker);
+    int64_t marker = -1;
+    if (latency_.probing()) {
+        marker = gpu ? (options_.read_marker ? options_.read_marker(work_) : -1) : read_marker(work_);
+    }
+    if (options_.prepare) options_.prepare(work_);
+    const auto t2 = Clock::now();
+    latency_.on_decoded(v.frame_id, t0, t2, marker);
     {
         std::lock_guard<std::mutex> lk(frame_m_);
         std::swap(latest_, work_);
@@ -499,16 +530,20 @@ void Session::decode_one(Item& item, Client& client) {
         latest_info_.frame_id = v.frame_id;
         latest_info_.sequence = published_;
         latest_info_.received = item.received;
-        latest_info_.decoded = t1;
-        if (stats_.decoded++ == 0) stats_.first_decoded = t1;
-        stats_.last_decoded = t1;
+        latest_info_.decoded = t2;
+        if (stats_.decoded++ == 0) stats_.first_decoded = t2;
+        if (gpu) ++stats_.gpu_pictures;
+        stats_.last_decoded = t2;
         if (stats_.decode_ms.size() >= 100000) stats_.decode_ms.erase(stats_.decode_ms.begin(), stats_.decode_ms.begin() + 50000);
-        stats_.decode_ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        stats_.decode_ms.push_back(std::chrono::duration<double, std::milli>(t2 - t0).count());
     }
+    // A GPU picture borrows the decoder's surface: the one the display has
+    // not taken goes back now rather than when the next one replaces it.
+    work_.gpu = {};
     if (wake_) wake_();
 }
 
-bool Session::take_frame(DecodedFrame& frame, FrameInfo& info) {
+bool ViewerSession::take_frame(DecodedFrame& frame, ViewerFrameInfo& info) {
     std::lock_guard<std::mutex> lk(frame_m_);
     if (published_ == taken_) return false;
     std::swap(frame, latest_);
@@ -517,19 +552,19 @@ bool Session::take_frame(DecodedFrame& frame, FrameInfo& info) {
     return true;
 }
 
-void Session::send_input(const InputEvent& e) {
+void ViewerSession::send_input(const InputEvent& e) {
     Client* c = nullptr;
     {
         std::lock_guard<std::mutex> lk(m_);
-        if (status_.state != SessionState::Connected) return;
+        if (status_.state != ViewerState::Connected) return;
         c = live_;
     }
     if (c) c->send_input(e);
 }
 
-SessionStats Session::stats() const {
+ViewerStats ViewerSession::stats() const {
     std::lock_guard<std::mutex> lk(frame_m_);
     return stats_;
 }
 
-}  // namespace broremote::view
+}  // namespace broremote

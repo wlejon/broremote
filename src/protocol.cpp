@@ -9,7 +9,9 @@ namespace {
 
 std::string message(MsgType type, wire::Writer& w) { return wire::make_message(uint16_t(type), w.data()); }
 
-bool input_kind_known(uint8_t k) { return k >= uint8_t(InputKind::Key) && k <= uint8_t(InputKind::Wheel); }
+bool input_kind_known(uint8_t k) {
+    return k >= uint8_t(InputKind::Key) && k <= uint8_t(InputKind::RelativeMotion);
+}
 
 }  // namespace
 
@@ -75,6 +77,7 @@ std::string InputMsg::encode() const {
             w.boolean(event.pressed);
             break;
         case InputKind::PointerMotion:
+        case InputKind::RelativeMotion:
             w.f32(event.x);
             w.f32(event.y);
             break;
@@ -104,6 +107,7 @@ bool InputMsg::decode(std::string_view payload, bool* unknown_kind) {
             event.pressed = r.boolean();
             break;
         case InputKind::PointerMotion:
+        case InputKind::RelativeMotion:
             event.x = r.f32();
             event.y = r.f32();
             if (!std::isfinite(event.x) || !std::isfinite(event.y)) r.fail();
@@ -289,6 +293,7 @@ std::string CursorMsg::encode() const {
     w.varint(state.hotspot_x);
     w.varint(state.hotspot_y);
     w.str(state.shape);
+    w.boolean(state.locked);  // 1.4
     return message(MsgType::Cursor, w);
 }
 
@@ -300,6 +305,8 @@ bool CursorMsg::decode(std::string_view payload) {
     state.hotspot_x = r.varint32();
     state.hotspot_y = r.varint32();
     state.shape = r.str_max(kMaxShapeBytes);
+    state.locked = false;
+    if (r.ok() && !r.at_end()) state.locked = r.boolean();  // 1.4
     return r.ok();
 }
 

@@ -18,6 +18,9 @@
 // engine thread in bro), as do the hooks.
 
 #include "broremote/server.h"
+#include "broremote/viewer.h"
+
+#include "embed/embed.h"
 
 #include <functional>
 
@@ -53,5 +56,35 @@ void shutdownRemote();
 
 // The running server, or null.
 [[nodiscard]] Server* activeServer();
+
+// ---- the viewer side: bro.remote.connect() -----------------------------------
+//
+//   bro.remote.connect({ssh, socket, sshCommand, sshProgram, pty, inputLane,
+//                       name, audio, mic, playback, micMuted, playbackMuted,
+//                       micDevice, speakerDevice, micTone, audioBufferMs})
+//       -> session: status(), stats(), audio(), probe(), probes(),
+//          sendInput(ev), setMicMuted(b), setPlaybackMuted(b), close(),
+//          on('state' | 'config', fn) / off, onstate / onconfig
+//
+// The session decodes; the host shows its pictures and sends its input
+// (bro: the <remoteview> element), reaching the session through
+// viewerSession().
+
+struct ViewerHooks {
+    // A session is about to start: the host sets what its display needs on
+    // the options (output memory, prepare, read_marker) before start().
+    std::function<void(ViewerSession* session, ViewerOptions& options)> sessionStarting;
+    // Just before a session is destroyed (close(), a reload, shutdownRemote):
+    // the host lets go of it; nothing may reach it after this returns.
+    std::function<void(ViewerSession* session)> sessionGone;
+    // Given to every session as its wake: any thread, when a picture, the
+    // cursor or the status changed.
+    std::function<void()> wake;
+};
+void setViewerHooks(ViewerHooks hooks);
+
+// The session a bro.remote.connect() object stands for (by identity, so a
+// look-alike object names nothing), or null.
+[[nodiscard]] ViewerSession* viewerSession(bronze::Value sessionObject);
 
 }  // namespace broremote::api

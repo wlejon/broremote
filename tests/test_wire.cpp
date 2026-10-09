@@ -251,7 +251,8 @@ void test_messages() {
     }
     {
         const InputEvent evs[] = {InputEvent::key(30, true), InputEvent::key(30, false), InputEvent::motion(12.25f, -3.5f),
-                                  InputEvent::button(0x110, true), InputEvent::wheel(-120, 360)};
+                                  InputEvent::button(0x110, true), InputEvent::wheel(-120, 360),
+                                  InputEvent::relative(-2.5f, 7.0f)};
         for (const InputEvent& e : evs) {
             InputMsg a{e};
             auto m = unframe(a.encode(), st);
@@ -409,11 +410,21 @@ void test_messages() {
         a.state.hotspot_x = 3;
         a.state.hotspot_y = 7;
         a.state.shape = "text";
+        a.state.locked = true;
         auto m = unframe(a.encode(), st);
         CursorMsg b;
         CHECK(b.decode(m.payload));
         CHECK(b.state == a.state);
-        check_truncations<CursorMsg>(a.encode());
+        // 1.4's `locked` is the last byte: without it the body is a 1.3
+        // cursor (not locked); every shorter prefix fails.
+        CursorMsg old;
+        CHECK(old.decode(m.payload.substr(0, m.payload.size() - 1)));
+        CHECK(!old.state.locked);
+        CHECK_EQ(old.state.shape, std::string("text"));
+        for (size_t n = 0; n + 1 < m.payload.size(); ++n) {
+            CursorMsg x;
+            CHECK(!x.decode(m.payload.substr(0, n)));
+        }
     }
     {
         ErrorMsg a{ErrorCode::NoCommonCodec, "nope"};

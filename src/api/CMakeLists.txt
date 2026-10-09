@@ -3,6 +3,7 @@
 # names nothing of bro: the host reaches it through the hooks in api.h.
 add_library(broremote_api STATIC
     api.cpp
+    viewer_api.cpp
 )
 set_target_properties(broremote_api PROPERTIES COMPILE_PDB_NAME broremote_api)
 target_include_directories(broremote_api PUBLIC

@@ -8,6 +8,7 @@
 
 #include "api.h"
 #include "object_builder.h"
+#include "viewer_api.h"
 
 #include "broremote/codec.h"
 
@@ -259,6 +260,8 @@ Server* activeServer() { return g_server.get(); }
 void installRemote() {
     g_listeners.clear();
     g_namespace.reset();
+    // Viewer sessions belong to the realm that made them.
+    closeAllViewers();
 
     ev::Persistent broP;
     {
@@ -312,12 +315,15 @@ void installRemote() {
     remote.def("removeEventListener", 2, removeListener);
     remote.set("onattach", ev::null());
     remote.set("ondetach", ev::null());
+    // The viewer side (viewer_api.cpp).
+    defineConnect(remote);
 
     g_namespace = std::make_unique<ev::Persistent>(remote.get());
     broP.set(ev::setProperty(broP.get(), "remote", remote.get()));
 }
 
 void tickRemote() {
+    tickViewers();
     if (!g_server) return;
     const size_t now = g_server->client_count();
     if (now == g_lastClients) return;
@@ -327,6 +333,7 @@ void tickRemote() {
 }
 
 void shutdownRemote() {
+    closeAllViewers();
     stopServer();
     g_listeners.clear();
     g_namespace.reset();

@@ -36,7 +36,9 @@ inline constexpr uint16_t kProtocolMajor = 1;
 // opens with Join instead of Hello to become the session's input lane.
 // 1.3 added the audio lane: PCM both ways (AudioStart / AudioStarted,
 // AudioData, AudioControl, AudioStats).
-inline constexpr uint16_t kProtocolMinor = 3;
+// 1.4 added pointer lock: Cursor ends with `locked`, and Input has a
+// RelativeMotion kind for a host whose pointer is locked.
+inline constexpr uint16_t kProtocolMinor = 4;
 
 // The lanes a server accepts (Join's lane name).
 inline constexpr std::string_view kInputLane = "input";
