@@ -153,6 +153,15 @@ void test_wire() {
     AudioStatsMsg sm2;
     CHECK(sm2.decode(std::string_view(msg).substr(wire::kHeaderBytes)));
     CHECK(sm2.mic_valid && sm2.mic_out_us == 9 && sm2.mic_buffer_us == 20000);
+    CHECK(sm2.status.empty());
+    // A 1.4 body (no status at the end) still decodes, with no status.
+    CHECK(sm2.decode(std::string_view(msg).substr(wire::kHeaderBytes, msg.size() - wire::kHeaderBytes - 1)));
+    CHECK(sm2.mic_out_us == 9 && sm2.status.empty());
+    // 1.5: the host's audio status.
+    sm.status = "the PipeWire daemon went away; reconnecting";
+    msg = sm.encode();
+    CHECK(sm2.decode(std::string_view(msg).substr(wire::kHeaderBytes)));
+    CHECK_EQ(sm2.status, sm.status);
 
     // PCM both formats: s16 within a quantum, f32 exact; a partial frame is refused.
     const float src[6] = {0.0f, 0.5f, -0.5f, 0.999f, -1.0f, 0.25f};

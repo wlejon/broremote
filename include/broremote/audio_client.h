@@ -11,7 +11,7 @@
 //
 // Neither touches the control connection or the input lane: losing the
 // audio lane ends audio and nothing else. No windowing toolkit is involved,
-// so a viewer of any kind (the SDL tool, a bro app) can use them.
+// so a viewer of any kind (`broremote probe`, a bro app) can use them.
 
 #include "broremote/audio.h"
 #include "broremote/audio_device.h"
@@ -123,7 +123,8 @@ public:
         std::string mic_device;         // what it captures from here
         std::string speaker_device;
         bool echo_cancel = false;       // the mic's echo cancellation is on (as far as the OS says)
-        std::string notes;              // why a direction is off
+        std::string notes;              // why a direction is off, and host_status when there is one
+        std::string host_status;        // 1.5: what is wrong with the host's audio now (its AudioStats)
         double rtt_ms = -1;             // the lane's round trip (the best recent sample)
         // One-way latencies, -1 until measured:
         double mic_latency_ms = -1;       // captured here -> played into the host's mic node

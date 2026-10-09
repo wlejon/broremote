@@ -159,8 +159,7 @@ struct Server::Impl final : brolink::LoopHandler {
     // The audio lanes (server_audio.cpp). Peers and the backend under `m`.
     std::vector<std::unique_ptr<AudioPeer>> audio_peers;
     std::shared_ptr<audio::Backend> audio_backend;
-    std::string audio_backend_error;  // why there is none (set once tried)
-    bool audio_backend_tried = false;
+    std::string audio_backend_error;  // why there is none (the last try)
     std::thread audio_thread;          // packs the monitor's audio into AudioDown, sends AudioStats
     std::mutex audio_wake_m;
     std::condition_variable audio_cv;

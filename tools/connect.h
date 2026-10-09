@@ -1,7 +1,7 @@
 #pragma once
 // The command-line half of where a viewer-side tool connects (the target
 // itself is the library's, broremote/connect.h). Shared by `broremote
-// record` and `broremote-view`.
+// record` and `broremote probe`.
 
 #include "broremote/connect.h"
 

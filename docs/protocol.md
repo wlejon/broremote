@@ -1,4 +1,4 @@
-# broremote wire protocol, version 1.4
+# broremote wire protocol, version 1.5
 
 A viewer and a broremote server talk over byte streams: a control connection, and from 1.2 optionally further connections (lanes, below) that join its session. Locally each is a connection to the server's local address: an AF_UNIX stream socket on Linux and macOS, a named pipe on Windows. Remotely each is the stdio of its own `ssh host broremote proxy`, which relays bytes to the remote host's local address without reading them. The protocol is the same in every case, and nothing in it depends on the transport. The transport (local listener and connector, peer checks, spawned streams, the proxy relay, lane grants) is the brolink sibling's.
 
@@ -106,7 +106,7 @@ Ping             ------------------>
 - **Packets.** `AudioUp` / `AudioDown` each carry whole interleaved frames of their direction's format, with a sequence number counting that direction's packets from 1 and the sender's monotonic clock (`u64` microseconds; the host's is the clock `Pong` reports) when the first frame was captured. A packet is whatever one device period delivered (a few milliseconds): nothing is batched. A sender whose lane backs up drops its oldest unsent audio rather than queueing it; a gap in the sequence shows it.
 - **Jitter buffers.** Each receiver plays through a jitter buffer that fills to a target depth (20 ms by default) before playing, plays silence and refills after running dry, and drops its oldest audio down to the target when it holds more than its bound (80 ms by default), so a stall or a faster sender clock never builds latency.
 - **Latency.** The viewer keeps the offset between its clock and the host's from `Ping` / `Pong` on the lane (the sample with the smallest round trip). Downlink: the playout pairs each frame's host capture stamp with when it is heard here. Uplink: `AudioStats` returns the latest viewer capture stamp the host's mic node played and the host time it played it. Each is one subtraction once the offset is known.
-- **The host's side.** For the mic the host makes a microphone node named for the viewer (`AudioStarted.mic_node`, e.g. "broremote: laptop mic") that exists while the lane does; optionally it is the default source meanwhile, and the previous default is restored. The host's audio is the default output's monitor.
+- **The host's side.** For the mic the host makes a microphone node named for the viewer (`AudioStarted.mic_node`, e.g. "broremote: laptop mic") that exists while the lane does; optionally it is the default source meanwhile, and the previous default is restored. The host's audio is the default output's monitor. The host's audio system restarting (a PipeWire daemon restarted) does not end the lane: the host reconnects to it and makes the mic node and the monitor capture again, and meanwhile (1.5) `AudioStats.status` says why there is no audio.
 - **Lifetime and failure.** The lane ends with its connection or with the session's control connection. Its failing, or the host lacking audio devices (`AudioStarted` with both directions off and `message` saying why), changes nothing on the control connection or the input lane. Any other message on the lane gets `Error(UnknownMessage)` and the lane stays; `AudioUp` or `AudioControl` before `AudioStart`, a second `AudioStart`, an `AudioUp` that is not whole frames, or `Hello` / `Join` are `Error(BadMessage)` and close the lane.
 
 ## Messages: client to server (0x01xx)
@@ -153,7 +153,7 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 | 0x0208 | Joined (1.2) | (empty) — the `Join` was accepted; the connection is now that lane |
 | 0x0209 | AudioStarted (1.3) | `bool playback`, `AudioFormat playback_format`, `bool mic`, `AudioFormat mic_format`, `str mic_node` (at most 256 bytes), `str message` (why a direction is off; at most 4096 bytes) |
 | 0x020A | AudioDown (1.3) | as `AudioUp`, the host's clock and the playback format |
-| 0x020B | AudioStats (1.3) | `bool mic_valid`, `u64 mic_capture_us` (the viewer's clock), `u64 mic_out_us` (the host's: when its mic node played that frame), `varint mic_buffer_us`, `varint mic_underruns`, `varint mic_dropped_frames`, `varint playback_dropped` (`AudioDown` packets the host dropped) |
+| 0x020B | AudioStats (1.3) | `bool mic_valid`, `u64 mic_capture_us` (the viewer's clock), `u64 mic_out_us` (the host's: when its mic node played that frame), `varint mic_buffer_us`, `varint mic_underruns`, `varint mic_dropped_frames`, `varint playback_dropped` (`AudioDown` packets the host dropped); 1.5 appends `str status` (at most 4096 bytes: what is wrong with the host's audio now, e.g. its audio system restarting; empty when nothing) |
 
 ### Timing (1.1)
 

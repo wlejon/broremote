@@ -38,7 +38,9 @@ inline constexpr uint16_t kProtocolMajor = 1;
 // AudioData, AudioControl, AudioStats).
 // 1.4 added pointer lock: Cursor ends with `locked`, and Input has a
 // RelativeMotion kind for a host whose pointer is locked.
-inline constexpr uint16_t kProtocolMinor = 4;
+// 1.5 added the host's audio status at the end of AudioStats (why there is
+// no audio right now, e.g. the PipeWire daemon restarting).
+inline constexpr uint16_t kProtocolMinor = 5;
 
 // The lanes a server accepts (Join's lane name).
 inline constexpr std::string_view kInputLane = "input";
@@ -299,6 +301,7 @@ struct AudioStatsMsg {
     uint64_t mic_underruns = 0;
     uint64_t mic_dropped_frames = 0;  // dropped to hold the depth bound, or did not fit
     uint64_t playback_dropped = 0;    // AudioDown packets the host dropped (the lane backed up)
+    std::string status;               // 1.5: what is wrong with the host's audio now (empty: nothing)
     [[nodiscard]] std::string encode() const;
     bool decode(std::string_view payload);
 };

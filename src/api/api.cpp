@@ -119,6 +119,7 @@ Value audioObject() {
     ObjectBuilder a;
     a.set("enabled", g_config.audio.enabled);
     a.set("micAsDefault", g_config.audio.mic_as_default);
+    a.set("status", g_server->audio_status());  // what is wrong with the audio now; "" when nothing
     ArrayBuilder viewers;
     for (const Server::AudioViewer& v : g_server->audio_viewers()) {
         ObjectBuilder o;

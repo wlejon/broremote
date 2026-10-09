@@ -66,20 +66,21 @@ src/server_audio.cpp  the host's side of the audio lanes
 src/api/        broremote_api, the bronze JavaScript binding (bro.remote):
                 api.cpp (hosting), viewer_api.cpp (bro.remote.connect)
 tools/          broremote (CLI: proxy, serve-test, codecs, encode, record,
-                tone, wav-info, mic-check, audio-devices),
+                probe, tone, wav-info, mic-check, audio-devices),
+                probe (a ViewerSession with no window, for scripted checks),
                 connect (the --ssh/--socket target, shared), test_pattern,
-                picture (decoded pictures to RGBA, PSNR)
-tools/view/     broremote-view, the stopgap SDL viewer (bro's <remoteview>
-                and helmapps' helmremote replace it): keymap (SDL scancode
-                -> evdev), input_map, display_timing (when a present reached
-                the screen, from DXGI), viewer_app (window, render loop),
-                png, main; its session is the library's ViewerSession
+                picture (decoded pictures to RGBA, PSNR), png
 tests/          ctest suite
 ```
 
+Nothing in broremote opens a window: it is a library plus a headless CLI.
+The viewer with a display is bro's `<remoteview>` over `bro.remote.connect`
+(helmapps' helmremote); an SDL viewer, `broremote-view`, came first and was
+removed once that one matched it (its scripted modes are `broremote probe`).
+
 CMake target `broremote` (alias `broremote::broremote`). Options:
-`BROREMOTE_BUILD_TESTS`, `BROREMOTE_BUILD_TOOLS`, `BROREMOTE_BUILD_VIEWER`
-(on when SDL3 is found), `BROREMOTE_ENABLE_API` (off; bro turns it on: builds
+`BROREMOTE_BUILD_TESTS`, `BROREMOTE_BUILD_TOOLS`,
+`BROREMOTE_ENABLE_API` (off; bro turns it on: builds
 `broremote_api` and its test against bronze, below). Which codecs exist is
 brovideo's build (`BROVIDEO_WITH_VAAPI`, auto on Linux when libva is found;
 `BROVIDEO_WITH_MF`, on for Windows) and brovideo's run-time probe
@@ -89,24 +90,13 @@ are honest on a box without the hardware.
 Dependencies resolve by the ecosystem convention, cmake/bro_deps.cmake
 (existing target, then the `../<name>` working tree, then the commit pinned in
 CMakeLists.txt, fetched at configure). brovideo is required (on Linux it
-brings brodmabuf in turn), and so is brolink. SDL3 for
-the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`; on
-Windows, when no vcpkg toolchain file points at it, the vcpkg trees at
-`$VCPKG_ROOT`, `../vcpkg` and `../../vcpkg` (triplet x64-windows) are tried,
-and `SDL3.dll` is copied next to the executables that load it. The viewer is
-built only when SDL3 is found, so a Linux box without it builds the rest.
+brings brodmabuf in turn), and so is brolink.
 
-The C runtime: a top-level MSVC build links the CRT statically, while
-vcpkg's x64-windows SDL3 is a DLL with the dynamic CRT. That mix is sound
-and deliberate: SDL's API never passes CRT objects (heap blocks, FILE*)
-across the DLL boundary (what it allocates is freed with `SDL_free`), so
-each side keeps its own CRT, the import library adds no conflicting default
-libraries, and `broremote.exe` stays free of the VC++ runtime. With
-`BROREMOTE_ENABLE_API` the top-level build uses the DLL CRT instead, because
-bronze's shared runtime (`bronze_runtime_shared`) hands CRT objects across its
-boundary. Inside bro,
-broremote sets no CRT of its own and `SDL3::SDL3` is bro's static SDL built
-with bro's settings, so nothing mixes there.
+The C runtime: a top-level MSVC build links the CRT statically, so
+`broremote.exe` needs no VC++ runtime. With `BROREMOTE_ENABLE_API` the
+top-level build uses the DLL CRT instead, because bronze's shared runtime
+(`bronze_runtime_shared`) hands CRT objects across its boundary. Inside bro,
+broremote sets no CRT of its own.
 
 ## Wire format
 
@@ -206,11 +196,41 @@ speakers (WASAPI)  <-- jitter buffer <--AudioDown-- default output's monitor
   directions off and why), or a device that will not open changes nothing
   for video or input. A host whose lane backs up drops its oldest unsent
   `AudioDown` (more than 16 queued) rather than queueing.
+- **The audio system restarting.** The PipeWire backend watches its core
+  for the daemon going away (EPIPE). A timer on its loop then reconnects
+  twice a second until a daemon answers, makes every running endpoint's
+  stream again on the new core (each viewer's mic node, under the same name,
+  and the desktop capture), and claims the default source again for the mic
+  nodes that held it once the new "default" metadata is bound. The lanes
+  never notice beyond the gap. Meanwhile `Backend::status()` says why there
+  is no audio, and the server passes it on: `AudioStats.status` (1.5) to each
+  viewer (`AudioSession::Stats::host_status`, also in `notes`) and
+  `Server::audio_status()` (`bro.remote.status().audio.status`) to the host.
+  A host whose audio system was down when a lane started tries again with
+  the next lane. Measured on the halo: `systemctl --user stop` of
+  pipewire, pipewire-pulse and wireplumber for 4 s, then start: the viewer
+  saw "PipeWire is not running ...; reconnecting", then "ok", and the mic
+  node `broremote.mic.<viewer>...` was back, recording at -21.5 dB mean
+  (against -19.7 before) from a Windows viewer's mic.
+- **A realtime budget of zero.** PipeWire's module-rt sets the process's
+  `RLIMIT_RTTIME` (soft and hard) as each context loads, to what rtkit or
+  xdg-desktop-portal's Realtime interface allows, and a portal that started
+  before rtkit was activated says 0 until it is restarted. The kernel
+  SIGKILLs a process whose realtime thread runs past that budget without
+  blocking, so with 0 the first tick landing while the data thread processes
+  kills the host: no log line, no core. Seen on the halo as helm (an
+  in-process host whose other PipeWire clients had already lowered the limit)
+  dying whenever something recorded a viewer's mic node, which, until it
+  died, read as a silent mic. The hard limit cannot be raised again, so the
+  backend checks it before and after making its context and, below 10 ms,
+  makes the context with `loop.rt-prio` 0: the data loop runs at normal
+  priority, and `status()` says why. Reproduce with
+  `prlimit --rttime=0:0 broremote serve-test`.
 
 **Why not broaudio's device layer.** It is compiled into the whole broaudio
 engine (synthesis, effects, spatial: far more than a lane needs), it uses SDL
 on Windows (no Communications category, so no echo cancellation, and SDL
-would be a library dependency where only the viewer tool may have one), and it
+would be a library dependency, where broremote has none), and it
 has no virtual source or sink monitor. broremote's rule is platform APIs and
 siblings, so it has its own small layer (audio_device.h): about 400 lines each
 over PipeWire and over WASAPI.
@@ -432,9 +452,9 @@ ack, say) must not assume `connect()` has returned yet.
 
 ### ViewerSession (viewer.h)
 
-A viewer of any kind, minus its window: `broremote-view` and bro's
-`<remoteview>` (through `bro.remote.connect`) both put their display and
-input around one. `start(ViewerOptions)` opens the target (`ConnectTarget`:
+A viewer of any kind, minus its window: bro's `<remoteview>` (through
+`bro.remote.connect`) puts its display and input around one, and
+`broremote probe` runs one with no display at all. `start(ViewerOptions)` opens the target (`ConnectTarget`:
 `ssh HOST broremote proxy`, or a local socket) on a connect thread, then
 the Client; a decode thread decodes each packet, acks it, crops the picture
 to the stream's size and publishes it as the newest frame (`take_frame`
@@ -518,7 +538,8 @@ NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
   can be tested with no bro. On exit it prints how many input lanes joined
   and how many inputs arrived on them. `--latency` answers each key or button press
   at once (it looks for input every millisecond) with a frame whose second
-  block row counts the presses, for `broremote-view --latency-test`;
+  block row counts the presses, for `broremote probe --latency-test` (and
+  `<remoteview>`'s probes);
   `--content desktop` is a still picture whose counter changes every frame
   and which changes whole once a second; `--window` sets the ack window. The pattern (tools/test_pattern.h) is a
   scrolling gradient, a sweeping white bar, pure red/green/blue swatches and
@@ -547,10 +568,17 @@ NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
   [--codec C] [--frames N] --out FILE`: connects as a viewer and writes the
   bitstream from the first keyframe to a file, acking each packet: what a
   server really sends (the test fixtures were made this way).
-- `broremote-view [--ssh HOST [--ssh-command CMD] | --socket NAME]
-  [options]`: the viewer, below.
+- `broremote probe [--ssh HOST [--ssh-command CMD] | --socket NAME]
+  [options]`: a viewer with no window, below.
 
-### broremote-view
+### broremote probe
+
+A `ViewerSession` with no display, for the scripted end-to-end checks
+(tools/probe.cpp). It "shows" a picture by taking it the moment the decode
+thread publishes it, so where a windowed viewer says presented it says
+taken, and nothing comes after it. The connection flags below are
+`ConnectTarget`'s, shared with `record`, and what they describe is the
+library's behaviour, so bro's viewer behaves the same.
 
 `--ssh HOST` runs `ssh -T -o BatchMode=yes HOST <cmd>` (`cmd` defaults to
 `broremote proxy`; `--ssh-command` replaces it; with `--socket NAME` and no
@@ -568,15 +596,14 @@ off.
 
 Audio lane (protocol 1.3): once video is up, the viewer opens a third
 connection the same way on its own thread and starts an `AudioSession`
-(audio_client.h, a library part: no SDL in it). Flags: `--no-audio-lane`,
-`--no-mic` (hear only), `--no-audio-playback` (send only), `--mic-device` /
+(audio_client.h). The probe leaves it off unless given `--audio`, so a
+check does not take this machine's mic and speakers; then `--no-mic` (hear
+only), `--no-audio-playback` (send only), `--mic-device` /
 `--speaker-device NAME` (default: the communications mic, the default
 output), `--mic-tone HZ` / `--mic-file WAV` (sent instead of the mic, paced
 in real time), `--record-audio WAV` (what the speakers were handed),
-`--audio-buffer MS`, `--audio-stats` (a line a second). Ctrl+Alt+M mutes the
-mic and Ctrl+Alt+A the host's audio (not forwarded); the title shows both
-latencies, and the closing report gives each latency's mean / min / max with
-the buffers' underruns and drops.
+`--audio-buffer MS`, `--audio-stats` (a line a second). The closing report
+gives each latency's mean / min / max with the buffers' underruns and drops.
 
 Which ssh: `--ssh-program`, else `$BROREMOTE_SSH`, else on Windows the
 system's own OpenSSH (`%SystemRoot%\System32\OpenSSH\ssh.exe`) when it is
@@ -597,54 +624,29 @@ stream and the pointer moving constantly (`--latency-motion`, the case
 where Nagle would hold small writes), the key-press-to-picture time and
 the round trip were the same within noise either way.
 
-Threads: the render (main) thread owns the SDL window and does nothing that
-blocks on the network or the decoder. A connect thread opens the stream and
-the `Client` (and meanwhile probes the decoders), so the window shows
-"connecting" at once. The Client's reader queues configs and packets for a
-decode thread (`tools/view/session.cpp`), which makes a decoder per codec
-(kept across size changes, which it handles in band), decodes each packet,
-acks it at once, decoded or not, and on a failure requests a keyframe (once
-per run of failures, until a keyframe arrives), crops the picture to the
-`StreamConfig` size and publishes it in a one-slot mailbox. The render
-thread takes the newest picture when woken (an SDL user event, at most one
-queued), so it never shows a queue of old frames; buffers are swapped, not
-copied or reallocated. Acking after decode rather than after display keeps
-the server's two-frame window moving even when presentation waits for
-vsync.
+Threads (the session's, src/viewer.cpp): the display's thread does nothing
+that blocks on the network or the decoder. A connect thread opens the
+stream and the `Client` (and meanwhile probes the decoders), so a display
+can say "connecting" at once. The Client's reader queues configs and
+packets for a decode thread, which makes a decoder per codec (kept across
+size changes, which it handles in band), decodes each packet, acks it at
+once, decoded or not, and on a failure requests a keyframe (once per run of
+failures, until a keyframe arrives), crops the picture to the
+`StreamConfig` size and publishes it in a one-slot mailbox. The display
+takes the newest picture when woken, so it never shows a queue of old
+frames; buffers are swapped, not copied or reallocated. Acking after decode
+rather than after display keeps the server's two-frame window moving even
+when presentation waits for vsync.
 
-Display: NV12 goes straight into an SDL NV12 streaming texture created
-with the BT.709 limited-range colour space (`SDL_UpdateNVTexture`, no CPU
-conversion); Raw's RGBA into an RGBA32 texture. The picture is drawn
-letterboxed into the window (resizable; on the first stream the window
-fits it, up to 90% of the display), linear scaling, vsync on unless
-`--no-vsync`. Vsync stays on: measured with the swap chain's own frame
-statistics, present-to-shown was the same with it off (8.7 ms mean
-windowed under DWM, 3.5 ms fullscreen, on a 360 Hz display; the window's
-DWM composition is the difference), and SDL's D3D11 vsync-off present
-(`DXGI_PRESENT_DO_NOT_WAIT`) can drop a present outright, which on a
-desktop that then stops changing would leave the last change unshown. Ctrl+Alt+Enter toggles fullscreen (not forwarded), and in
-fullscreen the keyboard is grabbed so system shortcuts go to the remote
-session. A zero-copy D3D11 path was not needed: the read-back and upload
-cost about 1-2 ms of a 16.7 ms frame.
+Display and input mapping are the display's own: bro's `<remoteview>`
+(bro's docs/remote-api.js) turns its keys, pointer and wheel into
+`InputEvent`s (evdev codes, stream pixels, 120ths of a detent with +y
+down) and shows the pictures, on the GPU where the decoder leaves them.
 
-Input (`input_map.cpp`, `keymap.cpp`): keys from SDL scancodes (USB HID
-usages, the same on every platform) to evdev `KEY_*` through a full
-table (letters, digits, F1-F24, modifiers, navigation, keypad,
-punctuation, ISO/JIS/Korean keys, media keys; checked against
-linux/input-event-codes.h); auto-repeat is not forwarded (the host repeats).
-Buttons to `BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA`; a click first moves the
-pointer to where it happened. Pointer positions map from window
-coordinates through the letterbox to stream pixels, clamped to the picture
-(motion over the bars pins to the edge). The wheel goes in 120ths, SDL's +y
-up negated to the protocol's +y down, with fractions of a 120th carried to
-the next event. Only what was pressed in the window is released, and focus
-loss releases every held key and button.
-
-Status: the window title shows the target and state (connecting, codec,
-size, displayed fps, decode time, decoder), and before the first picture
-the window says it in text. A connection that fails or ends exits with the
-reason (ssh's stderr included, e.g. "broremote: command not found");
-exit code 1 for a failure, 0 for a user close or the server's clean
+Status: the probe prints the stream when it starts (codec, size, decoder,
+the server's name and protocol minor). A connection that fails or ends
+exits with the reason (ssh's stderr included, e.g. "broremote: command not
+found"); exit code 1 for a failure, 0 for Ctrl+C or the server's clean
 shutdown. A server that cannot send any codec this machine decodes is
 named as such (with the decoders here); with `--any-codec` (no `SetCodec`)
 a stream it cannot decode says "this machine cannot decode the server's
@@ -655,24 +657,25 @@ gives the round trip and the offset between the clocks, and with each
 Video's server timing and FrameSent the tracker (`latency.cpp`) places
 every presented frame's age: server queue, encode, wait to send, net (the
 server's socket through ssh to fully received here, one way), decode wait,
-decode, present, and then present-to-shown from DXGI. The title shows the
-age and its main parts each second; `--stats` prints the whole line.
-`--latency-test N` against `serve-test --latency` closes the loop: it sends
-a press and release of `KEY_F13` (about four a second, one at a time),
-watches decoded pictures' input-marker row for the count that answers it,
-and reports input-to-decoded and input-to-presented with the mean parts
-(uplink plus the server noticing, queue, encode, wait, net, decode,
-present). `--latency-motion` keeps the pointer moving while it probes.
+decode, present (the probe's "take"). `--stats` prints the whole line each
+second. `--latency-test N` against `serve-test --latency` closes the loop:
+it sends a press and release of `KEY_F13` (about four a second, one at a
+time; `ViewerSession::probe`), watches decoded pictures' input-marker row
+for the count that answers it, and reports input-to-decoded and
+input-to-taken with the mean parts (uplink plus the server noticing,
+queue, encode, wait, net, decode, take). `--latency-motion` keeps the
+pointer moving while it probes.
 
-Scripting: `--frames N` exits after N pictures were shown (`--timeout S`
-fails if they were not), `--dump-png FILE` writes the last picture shown,
-`--check-pattern` compares it with serve-test's pattern (counter, luma and
-RGB PSNR) and reads the window back to check the colour swatches on
-screen. Every run ends with a report: pictures decoded/failed/shown,
-keyframe requests, fps, Mbit/s, decode time and packet-received-to-presented
-latency (mean, p50, p99).
+Scripting: `--frames N` exits after N pictures were taken (`--timeout S`
+fails if they were not), `--seconds S` stops after S seconds,
+`--dump-png FILE` writes the last picture, `--check-pattern` compares it
+with serve-test's pattern (counter, luma and RGB PSNR). Every run ends
+with a report: pictures decoded/failed/taken, keyframe requests, fps,
+Mbit/s, decode time and packet-received-to-taken latency (mean, p50, p99),
+and the timing parts averaged over the run.
 
-Measured from Windows (RTX 4090) to the halo's `serve-test --size
+Measured with the SDL viewer that came before the probe (presented on
+screen), from Windows (RTX 4090) to the halo's `serve-test --size
 1920x1080 --fps 60` over ssh on the LAN: H.264 900 of 900 pictures shown at
 60.1 fps, 19.7 Mbit/s, decode mean 3.0 ms (p99 7.4), received-to-presented
 mean 3.4 ms (p99 8.2); HEVC 60.3 fps, decode 2.0 ms (p99 2.6),
@@ -683,7 +686,9 @@ the on-screen swatches are exact.
 
 Windows (RTX 4090, 360 Hz display) to the halo's `serve-test --latency
 --size 1920x1080 --codec hevc --fps 60` over ssh on the LAN, 100 probes,
-key press to the answering picture presented (mean / p90 / max, ms):
+key press to the answering picture presented (mean / p90 / max, ms), with
+the SDL viewer (`broremote-view`, removed since; its probes are
+`broremote probe`'s):
 
 | Setup | scrolling pattern | desktop content |
 |---|---|---|
@@ -815,13 +820,17 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   and from each keyframe alone. The encoders and decoders themselves (quality
   bars, dmabuf frames, latency, the Media Foundation fixtures) are tested in
   brovideo.
-- The viewer (tests/test_view.cpp, wherever SDL3 is found): an in-process
-  Server streams Raw to the real `Viewer` on SDL's offscreen driver in a
-  1000x1000 window (the 640x360 picture letterboxed); injected SDL events
-  must arrive at the server as exactly the expected InputEvents: pointer
-  mapping and clamping, buttons, wheel units and fractions, key codes, no
-  auto-repeat, the fullscreen hotkey kept local, release on focus loss; then
-  a stream size change and the mapping following it.
+- The viewer's session (tests/test_viewer.cpp): an in-process Server
+  streams Raw to a `ViewerSession` over a real local connection: pictures
+  in order and whole, the status (config, server name, input lane), input
+  sent through the session arriving at the server as exactly the events
+  sent, in order; the host's cursor coming back; latency probes closing on
+  an input marker the frame source draws; a stream size change; a clean
+  close from this side. Mapping a display's own input (keys, pointer
+  through the letterbox, wheel) is the display's, and tested in bro.
+- `broremote probe` against `broremote serve-test`, both as processes
+  (tests/test_proxy.cpp): `--frames --check-pattern --dump-png`, then
+  `--latency-test` against `serve-test --latency`, then no server failing.
 - The binding (tests/test_api.cpp, `BROREMOTE_ENABLE_API`; builds bronze
   and brass): a bronze realm with the hooks set and `bro.remote`
   installed; option errors, host / same-options no-op / replace / stop and
@@ -840,5 +849,7 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   connection ending the audio lane; a host with audio off; and the lane's
   protocol errors (a wrong token; `AudioUp` before `AudioStart`).
   The platform backends are checked by hand (numbers above).
-- End to end: `serve-test` on the halo, `broremote-view --ssh halo
-  --frames N --check-pattern` on Windows (by hand; numbers above).
+- End to end: `serve-test` on the halo, `broremote probe --ssh halo
+  --frames N --check-pattern` and `--latency-test N` on Windows (by hand;
+  numbers above), and `broremote probe --ssh halo --stats` against helm's
+  live `--remote` server.

@@ -11,12 +11,15 @@
 //       The test pattern straight through an encoder, to a file.
 //   broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C] [--frames N] --out FILE
 //       Connect as a viewer and write the bitstream to a file.
+//   broremote probe [--ssh HOST [--ssh-command CMD] | --socket NAME] [options]
+//       A viewer with no window (tools/probe.cpp): scripted end-to-end checks.
 #include "broremote/audio.h"
 #include "broremote/client.h"
 #include "broremote/protocol.h"
 #include "broremote/server.h"
 #include "broremote/stream.h"
 #include "connect.h"
+#include "probe.h"
 #include "test_pattern.h"
 
 #include <algorithm>
@@ -47,7 +50,7 @@ int usage() {
                  "       broremote serve-test [--socket NAME] [--size WxH] [--codec raw|h264|hevc|av1] [--fps N]\n"
                  "                            [--bitrate KBPS] [--seconds N] [--window N] [--latency]\n"
                  "           --latency: answer each key / button press at once with a frame whose second\n"
-                 "           block row counts the presses (for broremote-view --latency-test)\n"
+                 "           block row counts the presses (for probe --latency-test)\n"
                  "           --window: unacked frames per client before encoding pauses (default 2)\n"
                  "           [--no-audio] [--mic-default]: audio lanes (on by default where PipeWire is)\n"
                  "           send this machine's audio and make each viewer's mic a node here;\n"
@@ -59,6 +62,22 @@ int usage() {
                  "           every frame and the whole picture once a second (frame-size spikes)\n"
                  "       broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C]\n"
                  "                        [--frames N] --out FILE\n"
+                 "       broremote probe [--ssh HOST [--ssh-command CMD] | --socket NAME] [options]\n"
+                 "           a viewer with no window; it takes each picture as it is decoded and reports\n"
+                 "           --frames N           stop after N pictures (--timeout S: fail if not in S seconds)\n"
+                 "           --seconds S          stop after S seconds\n"
+                 "           --check-pattern      compare the last picture with serve-test's pattern\n"
+                 "           --dump-png FILE      write the last picture\n"
+                 "           --stats              where each second's frames spent their time\n"
+                 "           --latency-test N     against serve-test --latency: N key presses, each timed\n"
+                 "                                to the picture that answers it (--latency-motion: keep\n"
+                 "                                the pointer moving meanwhile)\n"
+                 "           --any-codec          do not tell the server which codecs decode here\n"
+                 "           --audio              open the audio lane too (off by default), with\n"
+                 "                                --no-mic, --no-audio-playback, --mic-tone HZ, --mic-file WAV,\n"
+                 "                                --mic-device NAME, --speaker-device NAME, --record-audio WAV,\n"
+                 "                                --audio-buffer MS, --audio-stats\n"
+                 "           and the connection's --ssh-program PATH, --ssh-pty, --no-input-lane\n"
                  "       broremote tone --out WAV [--hz F] [--amplitude A] [--seconds S] [--rate R] [--channels N]\n"
                  "       broremote wav-info WAV   (level and dominant frequency, from the first sound)\n"
                  "       broremote audio-devices   (the mics and speakers --mic-device / --speaker-device name)\n"
@@ -644,6 +663,7 @@ int main(int argc, char** argv) {
     if (cmd == "codecs") return cmd_codecs();
     if (cmd == "encode") return cmd_encode(argc - 2, argv + 2);
     if (cmd == "record") return cmd_record(argc - 2, argv + 2);
+    if (cmd == "probe") return tools::cmd_probe(argc - 2, argv + 2, usage);
     if (cmd == "tone") return cmd_tone(argc - 2, argv + 2);
     if (cmd == "wav-info") return cmd_wav_info(argc - 2, argv + 2);
     if (cmd == "mic-check") return cmd_mic_check(argc - 2, argv + 2);

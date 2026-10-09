@@ -1,6 +1,7 @@
 // End to end through the broremote executable: a viewer reaching an
 // in-process server through `broremote proxy` run as a child stream (what
-// `ssh host broremote proxy` does remotely), and `broremote serve-test`.
+// `ssh host broremote proxy` does remotely), `broremote serve-test`, and
+// `broremote probe` against it.
 //   test_proxy <path to broremote>
 #include "broremote/protocol.h"
 #include "check.h"
@@ -250,6 +251,72 @@ void test_serve_test_pattern() {
     v.close();
 }
 
+// `broremote probe` against `broremote serve-test`, both as processes: the
+// scripted checks (pictures, the pattern, a PNG; then latency probes).
+bool wait_for_server(const std::string& name) {
+    return check::wait_for([&] { return connect_local(name) != nullptr; }, 10000);
+}
+
+void test_probe() {
+    check::phase("probe: frames, the pattern, a PNG");
+    std::string err;
+    {
+        const std::string name = unique_name("probe");
+        auto server = Process::spawn(
+            {g_exe, "serve-test", "--socket", name, "--size", "640x360", "--fps", "60", "--seconds", "30", "--no-audio"},
+            &err);
+        CHECK(server != nullptr);
+        if (!server) return;
+        CHECK(wait_for_server(name));
+        const std::filesystem::path png = std::filesystem::temp_directory_path() / (name + ".png");
+        auto probe = Process::spawn({g_exe, "probe", "--socket", name, "--frames", "30", "--timeout", "20",
+                                     "--check-pattern", "--dump-png", png.string()},
+                                    &err);
+        CHECK(probe != nullptr);
+        int code = -1;
+        if (probe) {
+            CHECK(probe->wait_for(std::chrono::seconds(30), &code));
+            CHECK_EQ(code, 0);
+        }
+        std::error_code ec;
+        CHECK(std::filesystem::exists(png, ec) && std::filesystem::file_size(png, ec) > size_t(640) * 360 * 4);
+        std::filesystem::remove(png, ec);
+        server->kill();
+        server->wait_for(std::chrono::seconds(10));
+    }
+
+    check::phase("probe: latency probes against serve-test --latency");
+    {
+        const std::string name = unique_name("probelat");
+        auto server = Process::spawn({g_exe, "serve-test", "--socket", name, "--size", "640x360", "--fps", "60",
+                                      "--seconds", "30", "--latency", "--no-audio"},
+                                     &err);
+        CHECK(server != nullptr);
+        if (!server) return;
+        CHECK(wait_for_server(name));
+        auto probe = Process::spawn({g_exe, "probe", "--socket", name, "--latency-test", "5", "--stats"}, &err);
+        CHECK(probe != nullptr);
+        int code = -1;
+        if (probe) {
+            CHECK(probe->wait_for(std::chrono::seconds(30), &code));
+            CHECK_EQ(code, 0);
+        }
+        server->kill();
+        server->wait_for(std::chrono::seconds(10));
+    }
+
+    check::phase("probe: no server fails");
+    {
+        auto probe = Process::spawn({g_exe, "probe", "--socket", unique_name("none"), "--frames", "1"}, &err);
+        CHECK(probe != nullptr);
+        int code = 0;
+        if (probe) {
+            CHECK(probe->wait_for(std::chrono::seconds(20), &code));
+            CHECK(code != 0);
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -269,5 +336,6 @@ int main(int argc, char** argv) {
 #endif
     test_serve_test_unavailable_codec();
     test_serve_test_pattern();
+    test_probe();
     return check::finish();
 }

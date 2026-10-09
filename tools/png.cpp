@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <vector>
 
-namespace broremote::view {
+namespace broremote::tools {
 
 namespace {
 
@@ -86,4 +86,4 @@ bool write_png(const std::string& path, const uint8_t* rgba, uint32_t width, uin
     return std::fclose(f) == 0 && ok;
 }
 
-}  // namespace broremote::view
+}  // namespace broremote::tools

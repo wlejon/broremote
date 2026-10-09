@@ -22,10 +22,9 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 |------|-------|
 | Wire primitives, protocol, streams (local socket, ssh child, stdio) | done, tested on Windows and Linux |
 | Server (I/O + encode threads, ack window, keyframes, input, cursor) and Client | done, tested on Windows and Linux |
-| `broremote proxy`, `serve-test`, `codecs`, `encode`, `record` | done |
+| `broremote proxy`, `serve-test`, `codecs`, `encode`, `record`, `probe` | done |
 | Codecs: Raw, VA-API encode (HEVC default, H.264, AV1), Media Foundation decode | in brovideo |
-| `broremote-view` (SDL3): Windows decodes; Linux shows Raw only, so far | done; a stopgap, kept until bro's viewer is accepted |
-| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' helmremote show it, at the SDL viewer's latency (docs/design.md) |
+| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' helmremote show it; `broremote probe` runs it with no window for scripted checks |
 | Audio lane (1.3): raw PCM both ways; the viewer's mic is a PipeWire source on the host, the host's output plays on the viewer (WASAPI) | done, tested Windows to Linux |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | done (helm `--remote`) |
 
@@ -60,16 +59,10 @@ ctest --test-dir build
 ```
 
 Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
-`BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_BUILD_VIEWER` (on when SDL3 is
-found), `BROREMOTE_ENABLE_API` (off; the
+`BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_ENABLE_API` (off; the
 `bro.remote` JavaScript binding, which bro turns on; it adds bronze and,
-through it, brass, the same way).
-
-SDL3 for the viewer comes from an existing `SDL3::SDL3` target or
-`find_package(SDL3)`; on Windows a vcpkg tree at `$VCPKG_ROOT`, `../vcpkg` or
-`../../vcpkg` (x64-windows) is found without a toolchain file, and
-`SDL3.dll` is copied next to the viewer. The static CRT of a top-level MSVC
-build and SDL3.dll's dynamic one coexist safely (see docs/design.md).
+through it, brass, the same way). Nothing here opens a window: the viewer
+with a display is bro's `<remoteview>` (helmapps' helmremote).
 
 Tests use ffmpeg as an oracle when it is on PATH (never linked).
 
@@ -79,23 +72,24 @@ On the host (Linux with VA-API):
 ```bash
 broremote serve-test --codec h264 --size 1920x1080   # a server fed a moving test pattern
 ```
-On the viewer (Windows):
+To watch and drive it, use bro's viewer (`bro helmremote HOST`, from
+helmapps). For scripted checks, `broremote probe` is the same viewer
+session with no window:
 ```bash
-broremote-view --ssh HOST                             # runs `ssh -T HOST broremote proxy`
-broremote-view --ssh HOST --ssh-command "~/broremote/build/broremote proxy"   # not on PATH there
-broremote-view --ssh HOST --frames 600 --check-pattern --dump-png last.png    # scripted check
-broremote-view --ssh HOST --stats                     # where each second's frames spent their time
+broremote probe --ssh HOST --frames 600 --check-pattern --dump-png last.png    # runs `ssh -T HOST broremote proxy`
+broremote probe --ssh HOST --ssh-command "~/broremote/build/broremote proxy" --frames 60   # not on PATH there
+broremote probe --ssh HOST --stats --seconds 10      # where each second's frames spent their time
 ```
 Latency, end to end (host: `broremote serve-test --codec hevc --size 1920x1080 --latency --socket lat`):
 ```bash
-broremote-view --ssh HOST --socket lat --latency-test 100   # key press -> picture, with the breakdown
+broremote probe --ssh HOST --socket lat --latency-test 100   # key press -> picture, with the breakdown
 ```
 On Windows the viewer runs the system's own OpenSSH by default: Git's MSYS
 ssh, often first on a shell's PATH, adds about 5 ms to every input event.
-Ctrl+Alt+Enter toggles fullscreen. Elsewhere:
+Elsewhere:
 ```bash
 broremote serve-test --codec raw --size 1280x720     # Raw works everywhere, locally
-broremote-view --socket default                       # a local server
+broremote probe --socket default --frames 60         # a local server
 broremote codecs                                      # what this build can encode and decode, and how
 broremote record --ssh HOST --frames 60 --out s.h264  # capture what a server sends
 ```

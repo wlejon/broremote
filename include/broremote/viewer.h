@@ -1,7 +1,7 @@
 #pragma once
 // The viewer's whole session, with no window in it: what a viewer of any
-// kind (broremote-view, a bro app through bro.remote.connect) puts its own
-// display and input around.
+// kind (a bro app through bro.remote.connect) puts its own display and
+// input around; `broremote probe` runs one with no display at all.
 //
 // A connect thread opens the stream (ssh or a local socket) and the Client;
 // the Client's reader hands configs and packets to a decode thread, which
@@ -51,7 +51,7 @@ struct ViewerAudioOptions {
 struct ViewerOptions {
     ConnectTarget target;
     ViewerAudioOptions audio;
-    std::string client_name = "broremote-view";
+    std::string client_name = "broremote viewer";  // sent in Hello
     // Send SetCodec with the codecs this machine decodes (so a server that
     // could fall back to one of them does). Off: take whatever it sends.
     bool negotiate = true;

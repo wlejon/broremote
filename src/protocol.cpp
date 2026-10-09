@@ -435,6 +435,7 @@ std::string AudioStatsMsg::encode() const {
     w.varint(mic_underruns);
     w.varint(mic_dropped_frames);
     w.varint(playback_dropped);
+    w.str(clip(status, kMaxErrorBytes));
     return message(MsgType::AudioStats, w);
 }
 
@@ -447,6 +448,8 @@ bool AudioStatsMsg::decode(std::string_view payload) {
     mic_underruns = r.varint();
     mic_dropped_frames = r.varint();
     playback_dropped = r.varint();
+    status.clear();
+    if (r.ok() && !r.at_end()) status = r.str_max(kMaxErrorBytes);  // 1.5
     return r.ok();
 }
 

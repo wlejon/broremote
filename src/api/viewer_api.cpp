@@ -257,6 +257,7 @@ Value audioOf(Entry& e) {
     o.set("speakerDevice", a.speaker_device);
     o.set("echoCancel", a.echo_cancel);
     o.set("notes", a.notes);
+    o.set("hostStatus", a.host_status);
     o.set("rttMs", a.rtt_ms);
     o.set("micLatencyMs", a.mic_latency_ms);
     o.set("playbackLatencyMs", a.playback_latency_ms);

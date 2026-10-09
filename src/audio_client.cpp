@@ -490,6 +490,8 @@ AudioSession::Stats AudioSession::stats() const {
         st.host_mic_buffer_ms = double(s.host.mic_buffer_us) / 1000.0;
         st.host_mic_underruns = s.host.mic_underruns;
         st.host_mic_dropped = s.host.mic_dropped_frames;
+        st.host_status = s.host.status;
+        if (!st.host_status.empty()) st.notes += (st.notes.empty() ? "host: " : "; host: ") + st.host_status;
         // The host's clock less the offset is this clock.
         if (synced && s.host.mic_valid) {
             st.mic_latency_ms = double(int64_t(s.host.mic_out_us) - offset - int64_t(s.host.mic_capture_us)) / 1000.0;

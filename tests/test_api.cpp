@@ -236,7 +236,7 @@ int main() {
     WAIT((api::tickRemote(), run("vev.join()") == "connected,config:64x32"), 5000);
     CHECK_EQ(run("vev.join()"), std::string("connected,config:64x32"));
     CHECK_EQ(run("const vt = vs.status(); [vt.codec, vt.width, vt.height, vt.server, vt.protocol, vt.inputLane].join()"),
-             std::string("raw,64,32,broremote,1.4,true"));
+             std::string("raw,64,32,broremote,1.") + std::to_string(kProtocolMinor) + ",true");
     CHECK(vlog.prepared.load() >= 3);
     run("vs.sendInput({kind: 'key', code: 30, pressed: true}); vs.sendInput({kind: 'relative', x: 2, y: -1});");
     {

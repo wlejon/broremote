@@ -131,6 +131,10 @@ public:
         uint64_t mic_dropped_frames = 0;
     };
     [[nodiscard]] std::vector<AudioViewer> audio_viewers() const;
+    // What is wrong with this host's audio now (the audio system is down or
+    // restarting, or there is none); empty when nothing is. Viewers on an
+    // audio lane see the same in their AudioStats (1.5).
+    [[nodiscard]] std::string audio_status() const;
 
     struct Impl;
 

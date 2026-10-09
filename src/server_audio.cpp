@@ -147,8 +147,10 @@ void Server::Impl::start_audio(ClientConn& c, const AudioStartMsg& s) {
 
     if (!cfg.audio.enabled) {
         note("audio is off on this host");
-    } else if (!audio_backend && !audio_backend_tried) {
-        audio_backend_tried = true;
+    } else if (!audio_backend) {
+        // Tried again for each lane while there is none: the audio system
+        // (a PipeWire daemon) may have come up since. Once made, the backend
+        // rides out its daemon restarting by itself.
         audio_backend = cfg.audio.backend;
         if (!audio_backend) audio_backend = audio::platform_backend(&audio_backend_error);
     }
@@ -264,6 +266,7 @@ void Server::Impl::pump_audio(AudioPeer& p, Clock::time_point now) {
         sm.mic_underruns = js.underruns;
         sm.mic_dropped_frames = js.dropped + js.overflow;
         sm.playback_dropped = p.down_dropped;
+        if (audio_backend) sm.status = audio_backend->status();
         queue(*c, shared(sm.encode()));
     }
 }
@@ -290,6 +293,13 @@ void Server::Impl::audio_loop() {
         }
         if (any) waker.wake();
     }
+}
+
+std::string Server::audio_status() const {
+    std::lock_guard<std::mutex> lk(impl_->m);
+    if (!impl_->cfg.audio.enabled) return {};
+    if (!impl_->audio_backend) return impl_->audio_backend_error;  // empty until a lane has tried
+    return impl_->audio_backend->status();
 }
 
 std::vector<Server::AudioViewer> Server::audio_viewers() const {

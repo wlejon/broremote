@@ -34,12 +34,9 @@ if(UNIX AND NOT APPLE)
     set_tests_properties(test_hw_stream PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
-# broremote-view's input path through the real Viewer (SDL's offscreen driver).
-if(TARGET broremote_view_core)
-    broremote_test(test_view TIMEOUT 120)
-    target_link_libraries(test_view PRIVATE broremote_view_core)
-    broremote_copy_runtime_dlls(test_view)
-endif()
+# The viewer's session (ViewerSession) with no window: pictures, input,
+# cursor, latency probes, a size change, closing.
+broremote_test(test_viewer ${PROJECT_SOURCE_DIR}/tools/test_pattern.cpp TIMEOUT 120)
 
 # The JavaScript binding in a bronze realm (BROREMOTE_ENABLE_API adds bronze).
 # bronze builds its shared runtime into its own directory; on Windows the

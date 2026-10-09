@@ -18,7 +18,11 @@
 //     Speakers          the default render device.
 //
 // A backend that cannot do something says so (open_* returns null with an
-// error); the lane then goes without that direction. Every endpoint calls
+// error); the lane then goes without that direction. The PipeWire backend
+// survives its daemon restarting: it reconnects, and every endpoint that was
+// running is made again on the new connection (the virtual mic reappears,
+// the default source is claimed again); meanwhile status() says why there
+// is no audio. Every endpoint calls
 // its function on its own realtime thread with interleaved float frames;
 // the function must not block, lock or allocate.
 //
@@ -103,6 +107,10 @@ public:
         bool is_default = false;  // the default (communications capture / console render)
     };
     [[nodiscard]] virtual std::vector<Device> devices() { return {}; }
+    // What is wrong with the audio system right now, for a lane's notes
+    // (e.g. "the PipeWire daemon went away; reconnecting"); empty when all
+    // is well. Any thread.
+    [[nodiscard]] virtual std::string status() const { return {}; }
 };
 
 // This machine's backend: PipeWire on Linux (when built with libpipewire and
