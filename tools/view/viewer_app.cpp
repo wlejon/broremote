@@ -138,10 +138,25 @@ void Viewer::handle(const SDL_Event& e) {
                 swallow_enter_ = true;
                 return;
             }
+            // Ctrl+Alt+M mutes the mic, Ctrl+Alt+A the host's audio; neither is sent.
+            if ((e.key.scancode == SDL_SCANCODE_M || e.key.scancode == SDL_SCANCODE_A) &&
+                (e.key.mod & SDL_KMOD_CTRL) && (e.key.mod & SDL_KMOD_ALT)) {
+                if (!e.key.repeat) {
+                    if (e.key.scancode == SDL_SCANCODE_M) session_->toggle_mic_mute();
+                    else session_->toggle_playback_mute();
+                    update_title(true);
+                }
+                swallowed_ = e.key.scancode;
+                return;
+            }
             break;
         case SDL_EVENT_KEY_UP:
             if (swallow_enter_ && e.key.scancode == SDL_SCANCODE_RETURN) {
                 swallow_enter_ = false;
+                return;
+            }
+            if (swallowed_ != SDL_SCANCODE_UNKNOWN && e.key.scancode == swallowed_) {
+                swallowed_ = SDL_SCANCODE_UNKNOWN;
                 return;
             }
             break;
@@ -243,6 +258,27 @@ void Viewer::run_probes(Clock::time_point now) {
     }
 }
 
+std::string Viewer::audio_text() const {
+    AudioSession::Stats a;
+    if (!session_->audio_stats(a)) return {};
+    if (!a.connected) return " - audio: " + (a.closed.empty() ? std::string("off") : a.closed);
+    char buf[160];
+    std::string t = " - ";
+    if (a.mic) {
+        std::snprintf(buf, sizeof buf, "mic %s%.0f ms", session_->mic_muted() ? "MUTED " : "",
+                      a.mic_latency_ms);
+        t += buf;
+    } else {
+        t += "no mic";
+    }
+    if (a.playback) {
+        std::snprintf(buf, sizeof buf, ", audio %s%.0f ms", session_->playback_muted() ? "MUTED " : "",
+                      a.playback_latency_ms);
+        t += buf;
+    }
+    return t;
+}
+
 void Viewer::update_title(bool force) {
     const auto now = Clock::now();
     const double since = std::chrono::duration<double>(now - title_time_).count();
@@ -256,6 +292,33 @@ void Viewer::update_title(bool force) {
             std::fprintf(stderr, "broremote-view: %.1f fps, %s, then shown %.2f ms later\n",
                          since > 0 ? double(displayed_ - title_displayed_) / since : 0.0,
                          timing_text(last_window_).c_str(), last_glass_);
+        }
+        AudioSession::Stats a;
+        if (session_->audio_stats(a) && a.connected) {
+            if (a.mic && a.mic_latency_ms >= 0) audio_up_ms_.push_back(a.mic_latency_ms);
+            if (a.playback && a.playback_latency_ms >= 0) audio_down_ms_.push_back(a.playback_latency_ms);
+        }
+        if (opt_.audio_stats) {
+            if (session_->audio_stats(a)) {
+                // A negative latency is "not measured yet": on the host side,
+                // nothing has recorded from the mic node since it appeared.
+                auto ms = [](double v) {
+                    char buf[32];
+                    if (v < 0) return std::string("(not playing yet)");
+                    std::snprintf(buf, sizeof buf, "%.1f ms", v);
+                    return std::string(buf);
+                };
+                std::fprintf(stderr,
+                             "broremote-view: audio: mic -> host %s (host buffer %.1f ms, %llu underruns), "
+                             "host -> here %s (buffer %.1f ms, %llu underruns, %llu dropped), rtt %.2f ms, "
+                             "%llu up / %llu down packets\n",
+                             ms(a.mic_latency_ms).c_str(), a.host_mic_buffer_ms,
+                             static_cast<unsigned long long>(a.host_mic_underruns), ms(a.playback_latency_ms).c_str(),
+                             a.playback_buffer_ms, static_cast<unsigned long long>(a.playback_underruns),
+                             static_cast<unsigned long long>(a.playback_dropped), a.rtt_ms,
+                             static_cast<unsigned long long>(a.mic_packets),
+                             static_cast<unsigned long long>(a.playback_packets));
+            }
         }
     }
     const SessionStatus& s = shown_status_;
@@ -285,6 +348,7 @@ void Viewer::update_title(bool force) {
             t += buf;
         }
         if (!s.decoder.empty()) t += " - " + s.decoder;
+        t += audio_text();
         if (!s.message.empty()) t += " - " + s.message;
     }
     title_time_ = now;
@@ -347,6 +411,55 @@ bool Viewer::step(int timeout_ms) {
     return true;
 }
 
+void Viewer::audio_report() {
+    AudioSession::Stats a;
+    if (!session_->audio_stats(a)) return;
+    auto range = [](const std::vector<double>& v) {
+        if (v.empty()) return std::string("not measured");
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "mean %.1f, min %.1f, max %.1f ms (%zu samples)", mean(v),
+                      *std::min_element(v.begin(), v.end()), *std::max_element(v.begin(), v.end()), v.size());
+        return std::string(buf);
+    };
+    std::fprintf(stderr,
+                 "broremote-view: audio: mic %s (%s%s), host audio %s (%s)\n"
+                 "  one-way latency: mic -> host node %s\n"
+                 "                   host -> speakers %s\n"
+                 "  %llu mic packets sent (%llu frames dropped before sending); %llu host packets received\n"
+                 "  host mic buffer: %llu underruns, %llu frames dropped; speakers: %llu underruns, %llu dropped\n",
+                 a.mic ? "on" : "off", a.mic_device.c_str(), a.echo_cancel ? ", echo cancelled" : "",
+                 a.playback ? "on" : "off", a.speaker_device.c_str(), range(audio_up_ms_).c_str(),
+                 range(audio_down_ms_).c_str(), static_cast<unsigned long long>(a.mic_packets),
+                 static_cast<unsigned long long>(a.mic_overflow), static_cast<unsigned long long>(a.playback_packets),
+                 static_cast<unsigned long long>(a.host_mic_underruns),
+                 static_cast<unsigned long long>(a.host_mic_dropped),
+                 static_cast<unsigned long long>(a.playback_underruns),
+                 static_cast<unsigned long long>(a.playback_dropped));
+    if (!a.notes.empty()) std::fprintf(stderr, "  %s\n", a.notes.c_str());
+    std::vector<float> rec;
+    uint32_t rate = 0, ch = 0;
+    session_->recorded_audio(rec, rate, ch);
+    if (rate && !rec.empty()) {
+        // The last second the speakers played: what it was.
+        const size_t n = std::min<size_t>(rec.size(), rate);
+        const audio::ToneAnalysis t = audio::analyze(rec.data() + (rec.size() - n), n, 1, rate);
+        std::fprintf(stderr, "  host audio heard: %.2f s; the last second %.1f dBFS, peak %.3f, dominant %.1f Hz\n",
+                     double(rec.size()) / rate, t.rms_dbfs, t.peak, t.frequency_hz);
+        if (!opt_.session.audio.record_file.empty()) {
+            audio::WavData w;
+            w.rate = rate;
+            w.channels = 1;
+            w.frames = std::move(rec);
+            std::string err;
+            if (audio::write_wav(opt_.session.audio.record_file, w, &err)) {
+                std::fprintf(stderr, "  wrote %s\n", opt_.session.audio.record_file.c_str());
+            } else {
+                std::fprintf(stderr, "  --record-audio: %s\n", err.c_str());
+            }
+        }
+    }
+}
+
 int Viewer::finish() {
     int rc = 0;
     const SessionStatus st = session_->status();
@@ -360,6 +473,7 @@ int Viewer::finish() {
                      static_cast<unsigned long long>(displayed_), opt_.frames);
         rc = 1;
     }
+    audio_report();
     if (stats.decoded > 0) {
         const double span = std::chrono::duration<double>(stats.last_decoded - stats.first_decoded).count();
         const double fps = span > 0 ? double(stats.decoded - 1) / span : 0;

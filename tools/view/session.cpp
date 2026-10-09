@@ -36,18 +36,27 @@ std::string codec_list(const std::vector<Codec>& v) {
 Session::Session(std::function<void()> wake) : wake_(std::move(wake)) {}
 
 Session::~Session() {
-    std::shared_ptr<Stream> stream;
+    std::shared_ptr<Stream> stream, audio_stream;
     {
         std::lock_guard<std::mutex> lk(m_);
         stopping_ = true;
         user_closed_ = true;
         stream = stream_;
+        audio_stream = audio_stream_;
     }
     cv_.notify_all();
     // Unblocks a connect in progress (ssh still starting, or the handshake)
     // as well as a live connection's reader.
     if (stream) stream->shutdown();
+    if (audio_stream) audio_stream->shutdown();
     if (connector_.joinable()) connector_.join();
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        audio_stream = audio_stream_;
+    }
+    if (audio_stream) audio_stream->shutdown();
+    if (audio_thread_.joinable()) audio_thread_.join();
+    audio_.reset();
     if (decoder_thread_.joinable()) decoder_thread_.join();
     if (pinger_.joinable()) pinger_.join();
     client_.reset();  // joins the reader (on_closed takes m_, so not under it)
@@ -231,6 +240,133 @@ void Session::connect_thread(SessionOptions options) {
     }
     if (user_closed_) live_->close();
     if (wake_) wake_();
+    // The audio lane comes up on its own thread, so video never waits for it.
+    if (options.audio.enabled) {
+        const std::optional<brolink::lanes::Grant> grant = live_->welcome().grant;
+        if (!grant || live_->welcome().minor < 3) {
+            std::fprintf(stderr, "broremote-view: no audio: the server speaks protocol %u.%u (audio is 1.3)\n",
+                         live_->welcome().major, live_->welcome().minor);
+        } else {
+            std::lock_guard<std::mutex> lk(m_);
+            if (!stopping_) audio_thread_ = std::thread([this, options, g = *grant] { audio_thread(options, g); });
+        }
+    }
+}
+
+void Session::audio_thread(SessionOptions options, brolink::lanes::Grant grant) {
+    const AudioOptions& ao = options.audio;
+    AudioSessionOptions o;
+    o.lane.mic = ao.mic;
+    o.lane.playback = ao.playback;
+    o.mic_device = ao.mic_device;
+    o.speaker_device = ao.speaker_device;
+    o.jitter_ms = ao.jitter_ms;
+    o.max_buffer_ms = std::max<uint32_t>(ao.jitter_ms * 4, ao.jitter_ms + 40);
+    if (!ao.mic_file.empty()) {
+        audio::WavData wav;
+        std::string err;
+        if (!audio::read_wav(ao.mic_file, wav, &err)) {
+            std::fprintf(stderr, "broremote-view: --mic-file: %s; no mic\n", err.c_str());
+            o.lane.mic = false;
+        } else {
+            // Mono at the file's own rate: the host's node converts the rate.
+            const size_t n = wav.frames.size() / wav.channels;
+            mic_file_.resize(n);
+            audio::convert_channels(wav.frames.data(), uint32_t(n), wav.channels, mic_file_.data(), 1);
+            mic_file_rate_ = wav.rate;
+            o.lane.mic_format.rate = wav.rate;
+            o.mic_generator = [this](float* out, uint32_t frames) {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    out[i] = mic_file_.empty() ? 0.0f : mic_file_[mic_file_pos_];
+                    if (++mic_file_pos_ >= mic_file_.size()) mic_file_pos_ = 0;
+                }
+            };
+        }
+    } else if (ao.mic_tone_hz > 0) {
+        mic_tone_ = std::make_unique<audio::Tone>(ao.mic_tone_hz, 0.5, o.lane.mic_format.rate, 1);
+        o.mic_generator = [this](float* out, uint32_t frames) { mic_tone_->fill(out, frames); };
+    }
+    {
+        // Always kept (a minute; ten with --record-audio), for the closing report.
+        auto rec = std::make_unique<Recording>();
+        rec->rate = o.lane.playback_format.rate;
+        rec->channels = o.lane.playback_format.channels;
+        rec->frames.resize(size_t(rec->rate) * (ao.record_file.empty() ? 60 : 600));
+        Recording* r = rec.get();
+        o.on_played = [r](const float* f, uint32_t n, int64_t) {
+            const size_t at = r->used.load(std::memory_order_relaxed);
+            const size_t k = std::min<size_t>(n, r->frames.size() - at);
+            for (size_t i = 0; i < k; ++i) r->frames[at + i] = f[i * r->channels];
+            r->used.store(at + k, std::memory_order_release);
+        };
+        recording_ = std::move(rec);
+    }
+
+    std::string err;
+    std::unique_ptr<Stream> opened = tools::open_stream(options.target, &err);
+    if (!opened) {
+        std::fprintf(stderr, "broremote-view: no audio: cannot open the audio lane: %s\n", err.c_str());
+        return;
+    }
+    std::shared_ptr<Stream> shared(std::move(opened));
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        if (stopping_) return;
+        audio_stream_ = shared;
+    }
+    std::unique_ptr<AudioSession> a = AudioSession::start(std::make_unique<SharedStream>(shared), grant, o, &err);
+    if (!a) {
+        std::fprintf(stderr, "broremote-view: no audio: %s\n", err.c_str());
+        return;
+    }
+    const AudioSession::Stats st = a->stats();
+    std::fprintf(stderr, "broremote-view: audio lane: mic %s%s%s, host audio %s%s%s\n",
+                 st.mic ? "-> " : "off", st.mic ? st.mic_node.c_str() : "",
+                 st.mic ? (" (from " + (st.mic_device.empty() ? std::string("?") : st.mic_device) +
+                           (st.echo_cancel ? ", echo cancelled)" : ")"))
+                              .c_str()
+                        : "",
+                 st.playback ? "-> " : "off", st.playback ? st.speaker_device.c_str() : "",
+                 st.notes.empty() ? "" : (" [" + st.notes + "]").c_str());
+    std::lock_guard<std::mutex> lk(m_);
+    if (!stopping_) audio_ = std::move(a);
+}
+
+bool Session::audio_stats(AudioSession::Stats& out) const {
+    std::lock_guard<std::mutex> lk(m_);
+    if (!audio_) return false;
+    out = audio_->stats();
+    return true;
+}
+
+void Session::toggle_mic_mute() {
+    std::lock_guard<std::mutex> lk(m_);
+    if (audio_) audio_->set_mic_muted(!audio_->mic_muted());
+}
+
+void Session::toggle_playback_mute() {
+    std::lock_guard<std::mutex> lk(m_);
+    if (audio_) audio_->set_playback_muted(!audio_->playback_muted());
+}
+
+bool Session::mic_muted() const {
+    std::lock_guard<std::mutex> lk(m_);
+    return audio_ && audio_->mic_muted();
+}
+
+bool Session::playback_muted() const {
+    std::lock_guard<std::mutex> lk(m_);
+    return audio_ && audio_->playback_muted();
+}
+
+void Session::recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_t& channels) const {
+    rate = channels = 0;
+    frames.clear();
+    if (!recording_) return;
+    const size_t n = recording_->used.load(std::memory_order_acquire);
+    frames.assign(recording_->frames.begin(), recording_->frames.begin() + std::ptrdiff_t(n));
+    rate = recording_->rate;
+    channels = 1;
 }
 
 void Session::on_closed(const std::string& why) {

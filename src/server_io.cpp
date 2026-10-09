@@ -64,6 +64,7 @@ void Server::Impl::on_closed(brolink::ConnId id) {
     if (it == clients.end()) return;
     if ((*it)->attached && !(*it)->closing) attached.fetch_sub(1);
     clients.erase(it);
+    drop_audio_peer(id);  // an audio lane's devices go with it
     // A client's session ends with its control connection: its lanes go too.
     for (brolink::ConnId lane : lanes.closed(id)) {
         if (ClientConn* l = find(lane); l && !l->closed) {
@@ -168,6 +169,7 @@ void Server::Impl::shutdown_clients() {
         if (!c->closed) loop->close(c->id, false);
     }
     clients.clear();
+    audio_peers.clear();
     attached.store(0);
     loop->close_listener();
 }
@@ -217,8 +219,9 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
 }
 
 // An input lane carries Input, and Ping to time it; the rest is the control
-// connection's.
+// connection's. An audio lane is server_audio.cpp's.
 void Server::Impl::handle_lane_message(ClientConn& c, uint16_t type, std::string_view payload) {
+    if (c.lane_name == kAudioLane) return handle_audio_message(c, type, payload);
     switch (MsgType(type)) {
         case MsgType::Input:
             handle_input(c, payload);
@@ -291,7 +294,7 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
 void Server::Impl::handle_join(ClientConn& c, std::string_view payload) {
     JoinMsg j;
     if (!j.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Join");
-    if (j.join.lane != kInputLane) {
+    if (j.join.lane != kInputLane && j.join.lane != kAudioLane) {
         return close_client(c, ErrorCode::JoinRefused, "there is no '" + j.join.lane + "' lane here");
     }
     const brolink::lanes::JoinResult r = lanes.join(c.id, j.join);

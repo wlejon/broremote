@@ -24,6 +24,18 @@ int usage() {
                  "                      Nagle off); --ssh-no-pty is the default ssh -T pipe\n"
                  "  --no-input-lane     send input on the control connection, not on a second\n"
                  "                      connection (a second ssh with --ssh) of its own\n"
+                 "  --no-audio-lane     no audio: neither the host's audio here nor this mic there\n"
+                 "  --no-mic            hear the host, but send no mic\n"
+                 "  --no-audio-playback send the mic, but do not play the host's audio\n"
+                 "  --mic-device NAME   the mic whose name contains NAME (default: the communications\n"
+                 "                      default; `broremote audio-devices` lists them)\n"
+                 "  --speaker-device NAME  the speakers likewise (default: the default output)\n"
+                 "  --mic-tone HZ       send a tone instead of the mic\n"
+                 "  --mic-file WAV      send WAV (looped) instead of the mic\n"
+                 "  --record-audio WAV  write what the speakers played (first channel) on exit\n"
+                 "  --audio-buffer MS   the playback jitter buffer's target (default 20)\n"
+                 "  --audio-stats       print the audio latencies and buffers every second\n"
+                 "                      (Ctrl+Alt+M mutes the mic, Ctrl+Alt+A the host's audio)\n"
                  "  --any-codec         do not tell the server which codecs decode here\n"
                  "  --fullscreen        start fullscreen (Ctrl+Alt+Enter toggles)\n"
                  "  --size WxH          initial window size (default: fit the stream)\n"
@@ -58,6 +70,27 @@ int main(int argc, char** argv) {
         if (tools::parse_connect_arg(argc, argv, i, o.session.target)) continue;
         if (!std::strcmp(a, "--any-codec")) {
             o.session.negotiate = false;
+        } else if (!std::strcmp(a, "--no-audio-lane")) {
+            o.session.audio.enabled = false;
+        } else if (!std::strcmp(a, "--no-mic")) {
+            o.session.audio.mic = false;
+        } else if (!std::strcmp(a, "--no-audio-playback")) {
+            o.session.audio.playback = false;
+        } else if (!std::strcmp(a, "--audio-stats")) {
+            o.audio_stats = true;
+        } else if (!std::strcmp(a, "--mic-tone") && has) {
+            o.session.audio.mic_tone_hz = std::atof(argv[++i]);
+            if (!(o.session.audio.mic_tone_hz > 0 && o.session.audio.mic_tone_hz < 20000)) return usage();
+        } else if (!std::strcmp(a, "--mic-device") && has) {
+            o.session.audio.mic_device = argv[++i];
+        } else if (!std::strcmp(a, "--speaker-device") && has) {
+            o.session.audio.speaker_device = argv[++i];
+        } else if (!std::strcmp(a, "--mic-file") && has) {
+            o.session.audio.mic_file = argv[++i];
+        } else if (!std::strcmp(a, "--record-audio") && has) {
+            o.session.audio.record_file = argv[++i];
+        } else if (!std::strcmp(a, "--audio-buffer") && has) {
+            if (!parse_uint(argv[++i], o.session.audio.jitter_ms) || o.session.audio.jitter_ms > 1000) return usage();
         } else if (!std::strcmp(a, "--fullscreen")) {
             o.fullscreen = true;
         } else if (!std::strcmp(a, "--no-vsync")) {

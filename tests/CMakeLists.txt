@@ -20,6 +20,7 @@ endfunction()
 
 broremote_test(test_wire)
 broremote_test(test_server)
+broremote_test(test_audio TIMEOUT 120)
 # Remoting through a hardware encoder, against ffmpeg (Linux; skipped, exit
 # 77, without one). The encoders themselves are tested in brovideo.
 if(UNIX AND NOT APPLE)

@@ -1,4 +1,4 @@
-# broremote wire protocol, version 1.2
+# broremote wire protocol, version 1.3
 
 A viewer and a broremote server talk over byte streams: a control connection, and from 1.2 optionally further connections (lanes, below) that join its session. Locally each is a connection to the server's local address: an AF_UNIX stream socket on Linux and macOS, a named pipe on Windows. Remotely each is the stdio of its own `ssh host broremote proxy`, which relays bytes to the remote host's local address without reading them. The protocol is the same in every case, and nothing in it depends on the transport. The transport (local listener and connector, peer checks, spawned streams, the proxy relay, lane grants) is the brolink sibling's.
 
@@ -84,6 +84,31 @@ Input, Ping      ------------------>
 - **Transport.** A lane reaches the server any way the control connection can: another local connection, or another `ssh host broremote proxy`. Each is its own TCP connection over ssh, so input never queues behind video anywhere.
 - A 1.0 / 1.1 server sends no grant, so a client never sends `Join` to one.
 
+## The audio lane (1.3)
+
+A second lane, `audio` (`kAudioLane`), joined exactly like the input lane, carries raw PCM both ways: the host's audio (what that machine plays) to the viewer, and the viewer's microphone to the host, where it is a microphone of its own. A viewer joins it only to a server whose `Welcome` says minor >= 3; a 1.2 server refuses the lane name (`JoinRefused`).
+
+```
+audio lane connection               server
+Join(session, token, "audio") ---->
+                 <------------------ Joined
+AudioStart       ------------------>
+                 <------------------ AudioStarted
+AudioUp, AudioUp ...  ------------->                (the viewer's mic)
+                 <------------------ AudioDown, AudioDown ...   (the host's audio)
+                 <------------------ AudioStats     (about twice a second, while the mic flows)
+AudioControl     ------------------>                (mute toggles, any time)
+Ping             ------------------>
+                 <------------------ Pong
+```
+
+- **Formats.** `AudioFormat := varint rate (8000..192000), u8 channels (1..8), u8 sample (1 = s16le, 2 = f32le)`; anything else is malformed. `AudioStart` says which directions the viewer wants and in what format; the host answers with the formats it will use (1.3 hosts use the ones asked for, converting in the audio system) or turns a direction off. Raw PCM only: a codec, when one comes, is a new sample-format value. At the defaults (48 kHz s16, stereo down, mono up) the lane carries 1.5 Mbit/s down and 0.77 up.
+- **Packets.** `AudioUp` / `AudioDown` each carry whole interleaved frames of their direction's format, with a sequence number counting that direction's packets from 1 and the sender's monotonic clock (`u64` microseconds; the host's is the clock `Pong` reports) when the first frame was captured. A packet is whatever one device period delivered (a few milliseconds): nothing is batched. A sender whose lane backs up drops its oldest unsent audio rather than queueing it; a gap in the sequence shows it.
+- **Jitter buffers.** Each receiver plays through a jitter buffer that fills to a target depth (20 ms by default) before playing, plays silence and refills after running dry, and drops its oldest audio down to the target when it holds more than its bound (80 ms by default), so a stall or a faster sender clock never builds latency.
+- **Latency.** The viewer keeps the offset between its clock and the host's from `Ping` / `Pong` on the lane (the sample with the smallest round trip). Downlink: the playout pairs each frame's host capture stamp with when it is heard here. Uplink: `AudioStats` returns the latest viewer capture stamp the host's mic node played and the host time it played it. Each is one subtraction once the offset is known.
+- **The host's side.** For the mic the host makes a microphone node named for the viewer (`AudioStarted.mic_node`, e.g. "broremote: laptop mic") that exists while the lane does; optionally it is the default source meanwhile, and the previous default is restored. The host's audio is the default output's monitor.
+- **Lifetime and failure.** The lane ends with its connection or with the session's control connection. Its failing, or the host lacking audio devices (`AudioStarted` with both directions off and `message` saying why), changes nothing on the control connection or the input lane. Any other message on the lane gets `Error(UnknownMessage)` and the lane stays; `AudioUp` or `AudioControl` before `AudioStart`, a second `AudioStart`, an `AudioUp` that is not whole frames, or `Hello` / `Join` are `Error(BadMessage)` and close the lane.
+
 ## Messages: client to server (0x01xx)
 
 | Type | Name | Body |
@@ -94,7 +119,10 @@ Input, Ping      ------------------>
 | 0x0104 | Input | `InputEvent` (below) |
 | 0x0105 | SetCodec | `varint n` (at most 16), `u8 codec` × n (preference order; unknown values are skipped), `varint max_bitrate_kbps` (32-bit; 0 = no limit) |
 | 0x0106 | Ping (1.1) | `u64 token` — answered at once with `Pong`. A client sends it only to a server whose `Welcome` says minor >= 1 |
-| 0x0107 | Join (1.2) | `varint session`, `u8[32] token` (both from the `Welcome` grant), `str lane` (at most 64 bytes; `input`) — the first message of a lane connection |
+| 0x0107 | Join (1.2) | `varint session`, `u8[32] token` (both from the `Welcome` grant), `str lane` (at most 64 bytes; `input`, or from 1.3 `audio`) — the first message of a lane connection |
+| 0x0108 | AudioStart (1.3) | `str source` (the viewer's machine, at most 256 bytes), `bool playback`, `AudioFormat playback_format`, `bool mic`, `AudioFormat mic_format` — the audio lane's first message after `Joined` |
+| 0x0109 | AudioUp (1.3) | `varint seq`, `u64 capture_us` (the viewer's clock), `bytes pcm` (at most 1 MiB; whole frames of the mic format) |
+| 0x010A | AudioControl (1.3) | `bool playback_muted` (the host stops sending `AudioDown`), `bool mic_muted` (the host's mic node plays silence) |
 
 ### InputEvent
 
@@ -120,6 +148,9 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 | 0x0206 | Pong (1.1) | `u64 token` (the Ping's), `u64 server_time_us` (the server's monotonic clock when it answered) |
 | 0x0207 | FrameSent (1.1) | `varint frame_id`, `varint wait_us`, `varint write_us` |
 | 0x0208 | Joined (1.2) | (empty) — the `Join` was accepted; the connection is now that lane |
+| 0x0209 | AudioStarted (1.3) | `bool playback`, `AudioFormat playback_format`, `bool mic`, `AudioFormat mic_format`, `str mic_node` (at most 256 bytes), `str message` (why a direction is off; at most 4096 bytes) |
+| 0x020A | AudioDown (1.3) | as `AudioUp`, the host's clock and the playback format |
+| 0x020B | AudioStats (1.3) | `bool mic_valid`, `u64 mic_capture_us` (the viewer's clock), `u64 mic_out_us` (the host's: when its mic node played that frame), `varint mic_buffer_us`, `varint mic_underruns`, `varint mic_dropped_frames`, `varint playback_dropped` (`AudioDown` packets the host dropped) |
 
 ### Timing (1.1)
 

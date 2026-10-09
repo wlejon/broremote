@@ -9,6 +9,7 @@
 // holds, and closes every client (each is sent Error(ServerShutdown) first,
 // best effort).
 
+#include "broremote/audio_device.h"
 #include "broremote/codec.h"
 #include "broremote/frame.h"
 
@@ -21,6 +22,24 @@
 
 namespace broremote {
 
+// The audio lane (1.3). A viewer that joins one may ask for the host's audio
+// (what this machine plays, captured from the default output's monitor) and
+// may send its microphone, which appears here as a microphone node of its
+// own ("broremote: <viewer> mic") for as long as that viewer is attached.
+struct ServerAudioConfig {
+    bool enabled = true;
+    // The devices. Null: audio::platform_backend() (PipeWire on Linux), made
+    // at the first AudioStart; without one a viewer is told audio is off.
+    std::shared_ptr<audio::Backend> backend;
+    // Make each viewer's mic node the default source while it exists (the
+    // previous default comes back when the last one goes), so programs that
+    // record from "the microphone" hear the viewer without being told.
+    bool mic_as_default = false;
+    uint32_t jitter_ms = 20;      // the mic's jitter buffer fills to this before playing
+    uint32_t max_buffer_ms = 80;  // and drops the oldest audio beyond this
+    uint32_t period_ms = 5;       // the device period asked for, both directions
+};
+
 struct ServerConfig {
     std::string socket_name = "default";        // where it listens: a socket or pipe named for it (stream.h)
     std::vector<Codec> codecs = {Codec::HEVC, Codec::H264};  // preference order; those this build cannot encode are skipped
@@ -29,6 +48,7 @@ struct ServerConfig {
     uint32_t max_frames_in_flight = 2;          // unacked frames per client before encoding pauses
     uint32_t keyframe_interval_s = 0;           // 0: keyframes only on demand
     std::string name = "broremote";             // sent in Welcome
+    ServerAudioConfig audio;
 };
 
 class Server {
@@ -89,10 +109,28 @@ public:
         uint64_t failed = 0;      // released unencoded: the encoder failed
         uint64_t streams = 0;     // StreamConfigs made (one per reconfigure)
         uint64_t window_waits = 0;  // frames submitted while a client was at its ack window (they wait)
-        uint64_t lanes = 0;         // lanes joined (1.2: a viewer's input lane)
+        uint64_t lanes = 0;         // lanes joined (1.2: input lanes; 1.3: audio lanes too)
         uint64_t lane_inputs = 0;   // Input messages that arrived on an input lane
+        uint64_t audio_lanes = 0;   // audio lanes started (1.3)
+        uint64_t audio_up = 0;      // AudioUp packets received (the viewers' mics)
+        uint64_t audio_down = 0;    // AudioDown packets sent (this machine's audio)
     };
     [[nodiscard]] Stats stats() const;
+
+    // Each viewer on an audio lane now.
+    struct AudioViewer {
+        std::string source;          // the viewer's machine, as it said
+        bool playback = false;       // it is sent this machine's audio
+        bool playback_muted = false;
+        bool mic = false;            // its mic is a node here
+        bool mic_muted = false;
+        std::string mic_node;        // the node's description ("broremote: <source> mic")
+        bool mic_default = false;    // the node is the default source
+        double mic_buffer_ms = 0;    // the mic's jitter buffer depth now
+        uint64_t mic_underruns = 0;
+        uint64_t mic_dropped_frames = 0;
+    };
+    [[nodiscard]] std::vector<AudioViewer> audio_viewers() const;
 
     struct Impl;
 

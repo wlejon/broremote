@@ -134,6 +134,10 @@ int main() {
     CHECK_EQ(run("const t = bro.remote.status(); [t.codec, t.width, t.height, t.bitrateKbps, t.stats.encoded, "
                  "t.stats.keyframes].join()"),
              std::string("raw,32,16,5000,1,1"));
+    // Audio: on by default, nobody on an audio lane yet.
+    CHECK_EQ(run("const u = bro.remote.status().audio; [u.enabled, u.micAsDefault, u.viewers.length, "
+                 "bro.remote.status().stats.audioLanes].join()"),
+             std::string("true,false,0,0"));
 
     check::phase("detach event");
     client.reset();
@@ -148,9 +152,15 @@ int main() {
              std::string("ok"));
 
     check::phase("replace and stop");
-    run("bro.remote.host({socket: '" + sock + "', codecs: 'raw', fps: 60})");
+    run("bro.remote.host({socket: '" + sock + "', codecs: 'raw', fps: 60, audio: false, micAsDefault: true})");
     CHECK_EQ(g_log.calls.size(), size_t(3));  // stopped, started again
     CHECK_EQ(run("bro.remote.status().fps"), std::string("60"));
+    CHECK_EQ(run("const w = bro.remote.status().audio; [w.enabled, w.micAsDefault].join()"),
+             std::string("false,true"));
+    CHECK_EQ(run("(() => { try { bro.remote.host({socket: '" + sock +
+                 "', audio: 'yes'}); return 'no' } catch (e) { return e instanceof TypeError ? 'ok' : 'x' } })()"),
+             std::string("ok"));
+    CHECK_EQ(g_log.calls.size(), size_t(3));  // a bad option changes nothing
     CHECK_EQ(run("bro.remote.stop()"), std::string("true"));
     CHECK_EQ(g_log.calls.size(), size_t(4));
     CHECK(g_log.server == nullptr);

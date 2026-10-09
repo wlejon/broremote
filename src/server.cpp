@@ -43,6 +43,7 @@ std::unique_ptr<Server> Server::create(const ServerConfig& cfg, std::string* err
     Impl* p = impl.get();
     p->io_thread = std::thread([p] { p->io_loop(); });
     p->encode_thread = std::thread([p] { p->encode_loop(); });
+    p->audio_thread = std::thread([p] { p->audio_loop(); });
     return std::unique_ptr<Server>(new Server(std::move(impl)));
 }
 
@@ -55,6 +56,12 @@ Server::~Server() {
         s.stop = true;
     }
     s.encode_cv.notify_all();
+    s.audio_stop.store(true);
+    {
+        std::lock_guard<std::mutex> lk(s.audio_wake_m);  // the audio thread is waiting, or will see the flag
+    }
+    s.audio_cv.notify_all();
+    if (s.audio_thread.joinable()) s.audio_thread.join();
     s.waker.wake();
     // The encode thread finishes any encode in progress (releasing its frame)
     // and exits; the I/O thread says goodbye to the clients and closes them.

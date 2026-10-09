@@ -56,6 +56,14 @@ uint32_t countOption(Value opts, const char* key, uint32_t def) {
     return static_cast<uint32_t>(d);
 }
 
+// A boolean option, or `def` when absent.
+bool boolOption(Value opts, const char* key, bool def) {
+    Value v = ev::getProperty(opts, key);
+    if (ev::isUndefined(v) || ev::isNull(v)) return def;
+    if (!ev::isBool(v)) typeError(std::string(key) + " must be true or false");
+    return ev::toBool(v);
+}
+
 Codec codecNamed(const std::string& name) {
     auto c = parse_codec(name);
     if (!c) typeError("unknown codec '" + name + "' (raw, h264, hevc or av1)");
@@ -94,12 +102,40 @@ ServerConfig configFrom(std::span<const Value> args) {
     cfg.bitrate_kbps = countOption(opts.get(), "bitrateKbps", cfg.bitrate_kbps);
     cfg.fps = countOption(opts.get(), "fps", cfg.fps);
     cfg.name = stringOption(opts.get(), "name", cfg.name);
+    cfg.audio.enabled = boolOption(opts.get(), "audio", cfg.audio.enabled);
+    cfg.audio.mic_as_default = boolOption(opts.get(), "micAsDefault", cfg.audio.mic_as_default);
     return cfg;
 }
 
 bool sameConfig(const ServerConfig& a, const ServerConfig& b) {
     return a.socket_name == b.socket_name && a.codecs == b.codecs && a.bitrate_kbps == b.bitrate_kbps &&
-           a.fps == b.fps && a.name == b.name;
+           a.fps == b.fps && a.name == b.name && a.audio.enabled == b.audio.enabled &&
+           a.audio.mic_as_default == b.audio.mic_as_default;
+}
+
+// status().audio: the setting and each viewer on an audio lane.
+Value audioObject() {
+    ObjectBuilder a;
+    a.set("enabled", g_config.audio.enabled);
+    a.set("micAsDefault", g_config.audio.mic_as_default);
+    ArrayBuilder viewers;
+    for (const Server::AudioViewer& v : g_server->audio_viewers()) {
+        ObjectBuilder o;
+        o.set("source", v.source);
+        o.set("playback", v.playback);
+        o.set("playbackMuted", v.playback_muted);
+        o.set("mic", v.mic);
+        o.set("micMuted", v.mic_muted);
+        if (v.mic) o.set("micNode", v.mic_node);
+        else o.set("micNode", ev::null());
+        o.set("micDefault", v.mic_default);
+        o.set("micBufferMs", v.mic_buffer_ms);
+        o.set("micUnderruns", static_cast<double>(v.mic_underruns));
+        o.set("micDroppedFrames", static_cast<double>(v.mic_dropped_frames));
+        viewers.push(o.get());
+    }
+    a.set("viewers", viewers.get());
+    return a.get();
 }
 
 // ---- the server ------------------------------------------------------------
@@ -154,7 +190,15 @@ Value statusObject() {
     stats.set("failed", static_cast<double>(s.failed));
     stats.set("streams", static_cast<double>(s.streams));
     stats.set("windowWaits", static_cast<double>(s.window_waits));
+    stats.set("lanes", static_cast<double>(s.lanes));
+    stats.set("audioLanes", static_cast<double>(s.audio_lanes));
+    stats.set("audioUp", static_cast<double>(s.audio_up));
+    stats.set("audioDown", static_cast<double>(s.audio_down));
     st.set("stats", stats.get());
+    {
+        ev::Persistent audio(audioObject());
+        st.set("audio", audio.get());
+    }
     return st.get();
 }
 

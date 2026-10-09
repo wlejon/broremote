@@ -318,4 +318,129 @@ bool ErrorMsg::decode(std::string_view payload) {
     return r.ok();
 }
 
+// ---- the audio lane -------------------------------------------------------------------
+
+namespace {
+
+void write_format(wire::Writer& w, const audio::Format& f) {
+    w.varint(f.rate);
+    w.u8(uint8_t(f.channels));
+    w.u8(uint8_t(f.sample));
+}
+
+audio::Format read_format(wire::Reader& r) {
+    audio::Format f;
+    f.rate = r.varint32();
+    f.channels = r.u8();
+    f.sample = audio::SampleFormat(r.u8());
+    if (r.ok() && !f.valid()) r.fail();
+    return f;
+}
+
+std::string_view clip(const std::string& s, size_t limit) {
+    return s.size() > limit ? std::string_view(s).substr(0, limit) : std::string_view(s);
+}
+
+}  // namespace
+
+std::string AudioStartMsg::encode() const {
+    wire::Writer w;
+    w.str(clip(source, kMaxNameBytes));
+    w.boolean(playback);
+    write_format(w, playback_format);
+    w.boolean(mic);
+    write_format(w, mic_format);
+    return message(MsgType::AudioStart, w);
+}
+
+bool AudioStartMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    source = r.str_max(kMaxNameBytes);
+    playback = r.boolean();
+    playback_format = read_format(r);
+    mic = r.boolean();
+    mic_format = read_format(r);
+    return r.ok();
+}
+
+std::string AudioStartedMsg::encode() const {
+    wire::Writer w;
+    w.boolean(playback);
+    write_format(w, playback_format);
+    w.boolean(mic);
+    write_format(w, mic_format);
+    w.str(clip(mic_node, kMaxNameBytes));
+    w.str(clip(message, kMaxErrorBytes));
+    return broremote::message(MsgType::AudioStarted, w);
+}
+
+bool AudioStartedMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    playback = r.boolean();
+    playback_format = read_format(r);
+    mic = r.boolean();
+    mic_format = read_format(r);
+    mic_node = r.str_max(kMaxNameBytes);
+    message = r.str_max(kMaxErrorBytes);
+    return r.ok();
+}
+
+std::string AudioDataMsg::encode_message(MsgType type, uint64_t seq, uint64_t capture_us, std::string_view pcm) {
+    wire::Writer w;
+    w.data().reserve(pcm.size() + 24);
+    w.varint(seq);
+    w.u64(capture_us);
+    w.str(pcm);
+    return message(type, w);
+}
+
+std::string AudioDataMsg::encode() const { return encode_message(type, seq, capture_us, pcm); }
+
+bool AudioDataMsg::decode(std::string_view payload, MsgType as) {
+    wire::Reader r(payload);
+    type = as;
+    seq = r.varint();
+    capture_us = r.u64();
+    pcm = r.str_max(kMaxAudioBytes);
+    return r.ok();
+}
+
+std::string AudioControlMsg::encode() const {
+    wire::Writer w;
+    w.boolean(playback_muted);
+    w.boolean(mic_muted);
+    return message(MsgType::AudioControl, w);
+}
+
+bool AudioControlMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    playback_muted = r.boolean();
+    mic_muted = r.boolean();
+    return r.ok();
+}
+
+std::string AudioStatsMsg::encode() const {
+    wire::Writer w;
+    w.boolean(mic_valid);
+    w.u64(mic_capture_us);
+    w.u64(mic_out_us);
+    w.varint(mic_buffer_us);
+    w.varint(mic_underruns);
+    w.varint(mic_dropped_frames);
+    w.varint(playback_dropped);
+    return message(MsgType::AudioStats, w);
+}
+
+bool AudioStatsMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    mic_valid = r.boolean();
+    mic_capture_us = r.u64();
+    mic_out_us = r.u64();
+    mic_buffer_us = r.varint32();
+    mic_underruns = r.varint();
+    mic_dropped_frames = r.varint();
+    playback_dropped = r.varint();
+    return r.ok();
+}
+
 }  // namespace broremote

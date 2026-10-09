@@ -13,6 +13,7 @@
 // (length + type + body), and decode(payload), which parses a body and
 // returns false when it is malformed.
 
+#include "broremote/audio.h"
 #include "broremote/codec.h"
 #include "broremote/frame.h"
 #include "broremote/wire.h"
@@ -33,10 +34,13 @@ inline constexpr uint16_t kProtocolMajor = 1;
 // 1.1 added Ping / Pong, FrameSent and the timing fields at the end of Video.
 // 1.2 added lanes: Welcome ends with a lane grant, and a further connection
 // opens with Join instead of Hello to become the session's input lane.
-inline constexpr uint16_t kProtocolMinor = 2;
+// 1.3 added the audio lane: PCM both ways (AudioStart / AudioStarted,
+// AudioData, AudioControl, AudioStats).
+inline constexpr uint16_t kProtocolMinor = 3;
 
 // The lanes a server accepts (Join's lane name).
 inline constexpr std::string_view kInputLane = "input";
+inline constexpr std::string_view kAudioLane = "audio";  // 1.3
 
 // Limits a decoder enforces on what a peer sends.
 inline constexpr size_t kMaxNameBytes = 256;        // Hello / Welcome names
@@ -44,6 +48,7 @@ inline constexpr size_t kMaxErrorBytes = 4096;      // Error message text
 inline constexpr size_t kMaxShapeBytes = 64;        // Cursor shape name
 inline constexpr size_t kMaxCodecList = 16;         // SetCodec entries
 inline constexpr uint32_t kMaxDimension = 16384;    // StreamConfig width / height
+inline constexpr size_t kMaxAudioBytes = 1u << 20;  // AudioData pcm (far beyond any sane packet)
 
 enum class MsgType : uint16_t {
     // client -> server
@@ -54,6 +59,9 @@ enum class MsgType : uint16_t {
     SetCodec = 0x0105,
     Ping = 0x0106,       // 1.1
     Join = 0x0107,       // 1.2: a lane connection's first message
+    AudioStart = 0x0108,    // 1.3, audio lane: what the viewer sends and wants
+    AudioUp = 0x0109,       // 1.3, audio lane: the viewer's mic (AudioDataMsg)
+    AudioControl = 0x010A,  // 1.3, audio lane: mute toggles
     // server -> client
     Welcome = 0x0201,
     StreamConfig = 0x0202,
@@ -63,6 +71,9 @@ enum class MsgType : uint16_t {
     Pong = 0x0206,       // 1.1
     FrameSent = 0x0207,  // 1.1
     Joined = 0x0208,     // 1.2: the answer to Join
+    AudioStarted = 0x0209,  // 1.3, audio lane: the answer to AudioStart
+    AudioDown = 0x020A,     // 1.3, audio lane: the host's audio (AudioDataMsg)
+    AudioStats = 0x020B,    // 1.3, audio lane: the host's view of the mic path
 };
 
 enum class ErrorCode : uint16_t {
@@ -220,6 +231,72 @@ struct CursorMsg {
 struct ErrorMsg {
     ErrorCode code = ErrorCode::None;
     std::string message;
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
+// ---- the audio lane (1.3) -----------------------------------------------------------
+// A connection that joined as kAudioLane carries these (and Ping / Pong, to
+// time it). Formats travel as: varint rate, u8 channels, u8 sample format;
+// an invalid one (audio::Format::valid) is malformed.
+
+// Viewer -> host, the lane's first message after Joined: which directions
+// it wants and in what format.
+struct AudioStartMsg {
+    std::string source;              // the viewer's machine, for the mic node's name (at most 256 bytes)
+    bool playback = true;            // send me the host's audio
+    audio::Format playback_format;   // the format it should come in
+    bool mic = true;                 // I will send my mic
+    audio::Format mic_format{48000, 1, audio::SampleFormat::S16};
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
+// Host -> viewer: what it is doing. A direction the host cannot serve is
+// false, with `message` saying why; the viewer then neither sends nor expects it.
+struct AudioStartedMsg {
+    bool playback = false;
+    audio::Format playback_format;   // what AudioDown carries
+    bool mic = false;
+    audio::Format mic_format;        // what AudioUp must carry
+    std::string mic_node;            // the virtual mic as the host's mixer shows it (at most 256 bytes)
+    std::string message;             // why a direction is off (at most 4096 bytes)
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
+// AudioUp and AudioDown: a block of PCM in the direction's format.
+struct AudioDataMsg {
+    MsgType type = MsgType::AudioUp;  // AudioUp or AudioDown
+    uint64_t seq = 0;                 // counts the direction's packets from 1; a gap is a packet the sender dropped
+    uint64_t capture_us = 0;          // the sender's monotonic clock when the first frame was captured
+    std::string pcm;                  // whole frames, interleaved, little endian
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload, MsgType as);
+    static std::string encode_message(MsgType type, uint64_t seq, uint64_t capture_us, std::string_view pcm);
+};
+
+// Viewer -> host: the mute toggles. A muted playback is not sent at all; a
+// muted mic is not sent, and the host's mic node plays silence.
+struct AudioControlMsg {
+    bool playback_muted = false;
+    bool mic_muted = false;
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
+// Host -> viewer, about twice a second while the mic flows: the latest mic
+// frame the host's node played, as (the viewer's capture stamp from AudioUp,
+// the host clock when the node played it), which with the clock offset
+// gives the mic's one-way latency; and the state of the host's jitter buffer.
+struct AudioStatsMsg {
+    bool mic_valid = false;           // the pair below is set (a frame has played)
+    uint64_t mic_capture_us = 0;      // the viewer's clock
+    uint64_t mic_out_us = 0;          // the host's clock
+    uint32_t mic_buffer_us = 0;       // the jitter buffer's depth now
+    uint64_t mic_underruns = 0;
+    uint64_t mic_dropped_frames = 0;  // dropped to hold the depth bound, or did not fit
+    uint64_t playback_dropped = 0;    // AudioDown packets the host dropped (the lane backed up)
     [[nodiscard]] std::string encode() const;
     bool decode(std::string_view payload);
 };

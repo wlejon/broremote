@@ -54,6 +54,10 @@ set(BROREMOTE_SOURCES
     src/server_encode.cpp
     src/client.cpp
     src/proxy.cpp
+    src/server_audio.cpp
+    src/audio_client.cpp
+    src/audio/audio.cpp
+    src/audio/device_paced.cpp
 )
 
 add_library(broremote STATIC ${BROREMOTE_SOURCES})
@@ -74,6 +78,33 @@ target_compile_definitions(broremote PRIVATE BROREMOTE_VERSION_STRING="${PROJECT
 if(WIN32)
     target_compile_definitions(broremote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
+# ---- the audio lane's devices (src/audio) -----------------------------------------
+# Platform APIs only: WASAPI on Windows (the viewer's mic and speakers),
+# PipeWire on Linux (the host's monitor capture and virtual mic; needs
+# libpipewire-0.3 at build time, else the host has no audio). Elsewhere, and
+# in tests, the timer-paced endpoints.
+set(BROREMOTE_HAS_PIPEWIRE OFF)
+if(WIN32)
+    target_sources(broremote PRIVATE src/audio/device_wasapi.cpp)
+    target_link_libraries(broremote PRIVATE ole32 avrt)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    option(BROREMOTE_PIPEWIRE "The host's audio through PipeWire" ON)
+    if(BROREMOTE_PIPEWIRE)
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(BROREMOTE_LIBPIPEWIRE QUIET IMPORTED_TARGET GLOBAL libpipewire-0.3)
+        endif()
+        if(BROREMOTE_LIBPIPEWIRE_FOUND)
+            set(BROREMOTE_HAS_PIPEWIRE ON)
+            target_sources(broremote PRIVATE src/audio/device_pipewire.cpp)
+            target_link_libraries(broremote PRIVATE PkgConfig::BROREMOTE_LIBPIPEWIRE)
+            message(STATUS "broremote: host audio through PipeWire (libpipewire ${BROREMOTE_LIBPIPEWIRE_VERSION})")
+        else()
+            message(STATUS "broremote: libpipewire-0.3 not found, the host has no audio lane devices")
+        endif()
+    endif()
+endif()
+target_compile_definitions(broremote PRIVATE BROREMOTE_HAS_PIPEWIRE=$<BOOL:${BROREMOTE_HAS_PIPEWIRE}>)
 # ---- brolink: the transport ---------------------------------------------------------
 # A bro_dependency (cmake/bro_deps.cmake): an existing brolink target (bro, or
 # bromux beside it, added it), else ../brolink, else the pinned commit.

@@ -11,6 +11,7 @@
 //       The test pattern straight through an encoder, to a file.
 //   broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C] [--frames N] --out FILE
 //       Connect as a viewer and write the bitstream to a file.
+#include "broremote/audio.h"
 #include "broremote/client.h"
 #include "broremote/protocol.h"
 #include "broremote/server.h"
@@ -48,6 +49,9 @@ int usage() {
                  "           --latency: answer each key / button press at once with a frame whose second\n"
                  "           block row counts the presses (for broremote-view --latency-test)\n"
                  "           --window: unacked frames per client before encoding pauses (default 2)\n"
+                 "           [--no-audio] [--mic-default]: audio lanes (on by default where PipeWire is)\n"
+                 "           send this machine's audio and make each viewer's mic a node here;\n"
+                 "           --mic-default makes that node the default source while it exists\n"
                  "       broremote codecs\n"
                  "       broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS] [--fps N]\n"
                  "                        [--keyframe-every N] [--out FILE] [--content scroll|desktop]\n"
@@ -55,6 +59,13 @@ int usage() {
                  "           every frame and the whole picture once a second (frame-size spikes)\n"
                  "       broremote record [--ssh HOST [--ssh-command CMD] | --socket NAME] [--codec C]\n"
                  "                        [--frames N] --out FILE\n"
+                 "       broremote tone --out WAV [--hz F] [--amplitude A] [--seconds S] [--rate R] [--channels N]\n"
+                 "       broremote wav-info WAV   (level and dominant frequency, from the first sound)\n"
+                 "       broremote audio-devices   (the mics and speakers --mic-device / --speaker-device name)\n"
+                 "       broremote mic-check [--seconds S] [--out WAV] [--play-tone HZ] [--device NAME]\n"
+                 "                           [--speaker-device NAME]\n"
+                 "           the mic an audio lane sends and its level; --play-tone plays a tone on the\n"
+                 "           speakers meanwhile, to see what of it the mic hears back\n"
                  "       broremote --version\n");
     return 2;
 }
@@ -112,6 +123,10 @@ int cmd_serve_test(int argc, char** argv) {
         const bool has = i + 1 < argc;
         if (!std::strcmp(a, "--latency")) {
             latency = true;
+        } else if (!std::strcmp(a, "--no-audio")) {
+            cfg.audio.enabled = false;
+        } else if (!std::strcmp(a, "--mic-default")) {
+            cfg.audio.mic_as_default = true;
         } else if (!std::strcmp(a, "--content") && has) {
             const std::string c = argv[++i];
             if (c == "desktop") desktop = true;
@@ -188,6 +203,8 @@ int cmd_serve_test(int argc, char** argv) {
         server->submit(f, [free_buf] { free_buf->busy = false; });
         ++n;
     };
+    auto next_audio_check = start;
+    std::string audio_desc;
     while (!g_stop) {
         if (seconds && std::chrono::steady_clock::now() - start >= std::chrono::seconds(seconds)) break;
         input.clear();
@@ -222,6 +239,21 @@ int cmd_serve_test(int argc, char** argv) {
         const auto wake = latency ? std::min(next, std::chrono::steady_clock::now() + std::chrono::milliseconds(1))
                                   : next;
         std::this_thread::sleep_until(wake);
+        // Say when a viewer's audio lane comes or goes.
+        if (now >= next_audio_check) {
+            next_audio_check = now + std::chrono::seconds(1);
+            const std::vector<Server::AudioViewer> av = server->audio_viewers();
+            std::string desc;
+            for (const auto& v : av) {
+                desc += "  " + v.source + ": host audio " + (v.playback ? "sent" : "off") + ", mic " +
+                        (v.mic ? "-> \"" + v.mic_node + "\"" + (v.mic_default ? " (the default source)" : "") : "off") +
+                        "\n";
+            }
+            if (desc != audio_desc) {
+                std::fprintf(stderr, "broremote serve-test: %zu audio lane(s)\n%s", av.size(), desc.c_str());
+                audio_desc = desc;
+            }
+        }
     }
     if (latency) std::fprintf(stderr, "broremote serve-test: %u presses answered\n", presses);
     const Server::Stats st = server->stats();
@@ -230,8 +262,10 @@ int cmd_serve_test(int argc, char** argv) {
                  "submitted while at the ack window %llu\n",
                  (unsigned long long)st.submitted, (unsigned long long)st.encoded, (unsigned long long)st.keyframes,
                  (unsigned long long)st.replaced, (unsigned long long)st.window_waits);
-    std::fprintf(stderr, "broremote serve-test: %llu input lanes joined, %llu inputs arrived on them\n",
+    std::fprintf(stderr, "broremote serve-test: %llu lanes joined (input and audio), %llu inputs arrived on input lanes\n",
                  (unsigned long long)st.lanes, (unsigned long long)st.lane_inputs);
+    std::fprintf(stderr, "broremote serve-test: %llu audio lanes, %llu mic packets in, %llu audio packets out\n",
+                 (unsigned long long)st.audio_lanes, (unsigned long long)st.audio_up, (unsigned long long)st.audio_down);
     server.reset();
     std::fprintf(stderr, "broremote serve-test: stopped after %llu frames\n", static_cast<unsigned long long>(n));
     return 0;
@@ -452,6 +486,153 @@ int cmd_record(int argc, char** argv) {
     return 0;
 }
 
+// A sine to a float WAV: for playing a known sound into an audio lane.
+int cmd_tone(int argc, char** argv) {
+    double hz = 1000, amp = 0.25, seconds = 5;
+    uint32_t rate = 48000, channels = 2;
+    std::string out;
+    for (int i = 0; i < argc; ++i) {
+        const char* a = argv[i];
+        const bool has = i + 1 < argc;
+        if (!std::strcmp(a, "--hz") && has) hz = std::atof(argv[++i]);
+        else if (!std::strcmp(a, "--amplitude") && has) amp = std::atof(argv[++i]);
+        else if (!std::strcmp(a, "--seconds") && has) seconds = std::atof(argv[++i]);
+        else if (!std::strcmp(a, "--rate") && has) { if (!parse_uint(argv[++i], rate)) return usage(); }
+        else if (!std::strcmp(a, "--channels") && has) { if (!parse_uint(argv[++i], channels)) return usage(); }
+        else if (!std::strcmp(a, "--out") && has) out = argv[++i];
+        else return usage();
+    }
+    if (out.empty() || !(hz > 0) || !(seconds > 0) || channels < 1 || channels > 8 || rate < 8000) return usage();
+    audio::WavData w;
+    w.rate = rate;
+    w.channels = channels;
+    w.frames.resize(size_t(seconds * rate) * channels);
+    audio::Tone(hz, amp, rate, channels).fill(w.frames.data(), uint32_t(w.frames.size() / channels));
+    std::string err;
+    if (!audio::write_wav(out, w, &err)) {
+        std::fprintf(stderr, "broremote tone: %s\n", err.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+// The microphone the audio lane would send, captured here for a few seconds:
+// which device, whether echo cancellation is on, and how loud it is.
+int cmd_mic_check(int argc, char** argv) {
+    double seconds = 3, play_hz = 0;
+    std::string out, device, speaker;
+    for (int i = 0; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+        else if (!std::strcmp(argv[i], "--play-tone") && i + 1 < argc) play_hz = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--device") && i + 1 < argc) device = argv[++i];
+        else if (!std::strcmp(argv[i], "--speaker-device") && i + 1 < argc) speaker = argv[++i];
+        else return usage();
+    }
+    std::string err;
+    std::shared_ptr<audio::Backend> be = audio::platform_backend(&err);
+    if (!be) {
+        std::fprintf(stderr, "broremote mic-check: %s\n", err.c_str());
+        return 1;
+    }
+    std::mutex m;
+    std::vector<float> got;
+    audio::CaptureSpec spec;
+    spec.source = audio::Source::Microphone;
+    spec.rate = 48000;
+    spec.channels = 1;
+    spec.device = device;
+    spec.echo_reference = speaker;
+    auto ep = be->open_capture(
+        spec,
+        [&](const float* f, uint32_t n, int64_t) {
+            std::lock_guard<std::mutex> lk(m);
+            got.insert(got.end(), f, f + n);
+        },
+        &err);
+    if (!ep || !ep->start(&err)) {
+        std::fprintf(stderr, "broremote mic-check: %s\n", err.c_str());
+        return 1;
+    }
+    const audio::EndpointInfo info = ep->info();
+    // --play-tone: the speakers play a tone meanwhile, so the capture shows
+    // what of it comes back (the echo path, and its cancellation).
+    std::unique_ptr<audio::Endpoint> spk;
+    audio::Tone tone(play_hz, 0.25, 48000, 2);
+    if (play_hz > 0) {
+        audio::PlaybackSpec ps;
+        ps.sink = audio::Sink::Speakers;
+        ps.rate = 48000;
+        ps.channels = 2;
+        ps.device = speaker;
+        spk = be->open_playback(ps, [&tone](float* f, uint32_t n, int64_t) { tone.fill(f, n); }, &err);
+        if (!spk || !spk->start(&err)) {
+            std::fprintf(stderr, "broremote mic-check: speakers: %s\n", err.c_str());
+            spk.reset();
+        } else {
+            std::printf("playing %.0f Hz on %s\n", play_hz, spk->info().device.c_str());
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(seconds * 1000)));
+    if (spk) spk->stop();
+    ep->stop();
+    const audio::ToneAnalysis t = audio::analyze(got.data(), got.size(), 1, 48000);
+    std::printf("%s (%s): %.2f s captured, %.1f dBFS RMS, peak %.4f%s, dominant %.1f Hz; echo cancellation %s; "
+                "device latency %.1f ms\n",
+                info.device.c_str(), be->name(), double(got.size()) / 48000, t.rms_dbfs, t.peak,
+                t.peak == 0 ? " (digital silence)" : "", t.frequency_hz, info.echo_cancel ? "on" : "not reported",
+                info.latency_ms);
+    if (!out.empty()) {
+        audio::WavData w;
+        w.rate = 48000;
+        w.channels = 1;
+        w.frames = std::move(got);
+        if (!audio::write_wav(out, w, &err)) std::fprintf(stderr, "broremote mic-check: %s\n", err.c_str());
+    }
+    return 0;
+}
+
+int cmd_audio_devices() {
+    std::string err;
+    std::shared_ptr<audio::Backend> be = audio::platform_backend(&err);
+    if (!be) {
+        std::fprintf(stderr, "broremote audio-devices: %s\n", err.c_str());
+        return 1;
+    }
+    const auto devs = be->devices();
+    if (devs.empty()) std::printf("(%s: no device choice; the system defaults are used)\n", be->name());
+    for (const auto& d : devs) {
+        std::printf("%s %s%s\n", d.capture ? "mic     " : "speakers", d.name.c_str(), d.is_default ? "  (default)" : "");
+    }
+    return 0;
+}
+
+// What a WAV holds, from its first loud sample on: level and dominant frequency.
+int cmd_wav_info(int argc, char** argv) {
+    if (argc != 1) return usage();
+    audio::WavData w;
+    std::string err;
+    if (!audio::read_wav(argv[0], w, &err)) {
+        std::fprintf(stderr, "broremote wav-info: %s\n", err.c_str());
+        return 1;
+    }
+    const size_t n = w.frames.size() / w.channels;
+    const size_t on = audio::first_onset(w.frames.data(), n, w.channels, 0.01f);
+    std::printf("%s: %u Hz, %u ch, %.3f s\n", argv[0], w.rate, w.channels, double(n) / w.rate);
+    if (on == SIZE_MAX) {
+        const audio::ToneAnalysis all = audio::analyze(w.frames.data(), n, w.channels, w.rate);
+        std::printf("  quiet: nothing reaches -40 dBFS (%.1f dBFS RMS, peak %.5f%s)\n", all.rms_dbfs, all.peak,
+                    all.peak == 0 ? ", digital silence" : "");
+        return 0;
+    }
+    size_t end = n;
+    while (end > on && std::abs(w.frames[(end - 1) * w.channels]) < 0.01f) --end;
+    const audio::ToneAnalysis t = audio::analyze(w.frames.data() + on * w.channels, end - on, w.channels, w.rate);
+    std::printf("  sound from %.3f to %.3f s: %.2f dBFS RMS, peak %.3f, dominant %.2f Hz (first channel)\n",
+                double(on) / w.rate, double(end) / w.rate, t.rms_dbfs, t.peak, t.frequency_hz);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -462,6 +643,10 @@ int main(int argc, char** argv) {
     if (cmd == "codecs") return cmd_codecs();
     if (cmd == "encode") return cmd_encode(argc - 2, argv + 2);
     if (cmd == "record") return cmd_record(argc - 2, argv + 2);
+    if (cmd == "tone") return cmd_tone(argc - 2, argv + 2);
+    if (cmd == "wav-info") return cmd_wav_info(argc - 2, argv + 2);
+    if (cmd == "mic-check") return cmd_mic_check(argc - 2, argv + 2);
+    if (cmd == "audio-devices") return cmd_audio_devices();
     if (cmd == "--version") {
         std::printf("broremote %s, protocol %u.%u\n", "0.1.0", unsigned(kProtocolMajor), unsigned(kProtocolMinor));
         return 0;

@@ -69,6 +69,31 @@ struct ClientConn {
     Clock::time_point front_started{};  // when out.front() was handed to the loop
 };
 
+// One viewer's audio lane (server_audio.cpp). The rings come before the
+// endpoints, so the endpoints (whose realtime callbacks use the rings) are
+// destroyed, and stopped, first.
+struct AudioPeer {
+    brolink::ConnId lane = 0;
+    std::string source;
+    AudioStartedMsg started;
+    bool playback_muted = false;
+    bool mic_muted = false;
+    std::unique_ptr<audio::PcmRing> down;       // monitor (realtime) -> the audio thread
+    std::unique_ptr<audio::JitterBuffer> mic;   // the I/O thread -> the mic node (realtime)
+    std::atomic<uint64_t> down_overflow{0};     // monitor frames that found the ring full
+    std::unique_ptr<audio::Endpoint> monitor;
+    std::unique_ptr<audio::Endpoint> mic_node;
+    bool mic_default = false;
+    uint64_t down_seq = 0;
+    uint64_t down_dropped = 0;  // AudioDown messages dropped because the lane backed up
+    uint64_t up_seq = 0;
+    uint64_t up_gaps = 0;       // AudioUp sequence gaps (the viewer dropped some)
+    Clock::time_point next_stats{};
+    std::vector<float> scratch;
+    std::vector<float> decoded;
+    std::string pcm;
+};
+
 struct Pending {
     Frame frame;
     std::function<void()> release;
@@ -131,6 +156,17 @@ struct Server::Impl final : brolink::LoopHandler {
     std::vector<InputEvent> input;
     uint64_t lane_inputs = 0;  // Input messages that came on an input lane (under input_m)
 
+    // The audio lanes (server_audio.cpp). Peers and the backend under `m`.
+    std::vector<std::unique_ptr<AudioPeer>> audio_peers;
+    std::shared_ptr<audio::Backend> audio_backend;
+    std::string audio_backend_error;  // why there is none (set once tried)
+    bool audio_backend_tried = false;
+    std::thread audio_thread;          // packs the monitor's audio into AudioDown, sends AudioStats
+    std::mutex audio_wake_m;
+    std::condition_variable audio_cv;
+    std::atomic<bool> audio_pending{false};  // a monitor delivered frames (set from realtime threads)
+    std::atomic<bool> audio_stop{false};
+
     // ---- server_io.cpp (I/O thread; `m` held unless noted) ----
     void io_loop();                                  // takes `m` itself
     // brolink::LoopHandler, on the I/O thread (each takes `m` itself).
@@ -154,6 +190,15 @@ struct Server::Impl final : brolink::LoopHandler {
     // Recompute want_codec / want_kbps from the attached clients' SetCodec.
     // False when no codec suits every client.
     bool choose_codec();
+
+    // ---- server_audio.cpp ----
+    void handle_audio_message(ClientConn& c, uint16_t type, std::string_view payload);  // I/O thread, `m` held
+    void start_audio(ClientConn& c, const AudioStartMsg& start);                         // I/O thread, `m` held
+    AudioPeer* audio_peer(brolink::ConnId lane);                                        // `m` held
+    void drop_audio_peer(brolink::ConnId lane);                                         // `m` held
+    void audio_loop();                                                                  // the audio thread
+    void pump_audio(AudioPeer& p, Clock::time_point now);                               // `m` held
+    void queue_audio(ClientConn& c, AudioPeer& p, SharedMessage msg);                   // `m` held
 
     // ---- server_encode.cpp (encode thread) ----
     void encode_loop();                              // takes `m` itself

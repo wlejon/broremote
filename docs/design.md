@@ -2,7 +2,9 @@
 
 broremote streams a whole desktop session from one machine to another: the
 composited output goes out as hardware-encoded video, and keyboard and pointer
-input come back. It is a C++20 library with no dependency on bro or bronze.
+input come back. Audio goes both ways: the viewer hears the host's audio, and
+the viewer's microphone is a microphone on the host. It is a C++20 library
+with no dependency on bro or bronze.
 In the bro ecosystem it remotes helm: bro, running helm under DRM on Linux,
 hosts a broremote server; a viewer on another machine shows the session.
 
@@ -43,10 +45,21 @@ include/broremote/
   codec.h       brovideo's Codec, Encoder, Decoder and their configs; codec_known() for the wire
   server.h      Server: the host submits frames and drains input
   client.h      Client: connects, receives packets, sends input
+  audio.h       PCM formats and conversion, the SPSC ring, the jitter buffer,
+                tone analysis (level, frequency, onset), WAV files
+  audio_device.h  the small audio device layer: Backend (capture, playback,
+                devices), the platform backend, paced generated / discarding
+                endpoints for tests
+  audio_client.h  the viewer's audio lane: AudioClient (the protocol) and
+                AudioSession (devices on both ends, latency)
   api.h         the JavaScript binding's public header (forwards to src/api)
 src/            implementation (no platform pieces: those are brolink's)
+src/audio/      audio.cpp; device_pipewire.cpp (Linux), device_wasapi.cpp
+                (Windows), device_paced.cpp (paced endpoints; the fallback)
+src/server_audio.cpp  the host's side of the audio lanes
 src/api/        broremote_api, the bronze JavaScript binding (bro.remote)
-tools/          broremote (CLI: proxy, serve-test, codecs, encode, record),
+tools/          broremote (CLI: proxy, serve-test, codecs, encode, record,
+                tone, wav-info, mic-check, audio-devices),
                 connect (the --ssh/--socket target, shared), test_pattern,
                 picture (decoded pictures to RGBA, PSNR)
 tools/view/     broremote-view: keymap (SDL scancode -> evdev), input_map,
@@ -123,7 +136,71 @@ a keyframe queued on the control connection holds up everything behind it in
 the server's queue, the proxy and the ssh channel, and a lane is a separate
 connection all the way (over ssh, a second ssh). The session ends with the
 control connection; a lane that fails or closes only sends input back to the
-control connection.
+control connection. Never ssh's ControlMaster: multiplexed channels share one
+TCP connection and its head-of-line blocking, which is what lanes avoid.
+
+### The audio lane (1.3)
+
+A third connection, `Join{..., "audio"}`, carries raw PCM both ways, timestamped
+on the sender's clock; docs/protocol.md has the messages. Raw first, a codec
+later (a new sample-format value): at 48 kHz s16, stereo down and mono up, it
+is 1.5 + 0.77 Mbit/s, nothing next to the video.
+
+```
+viewer                                         host
+mic (WASAPI, Communications) --AudioUp-->  jitter buffer --> virtual source node
+speakers (WASAPI)  <-- jitter buffer <--AudioDown-- default output's monitor
+```
+
+- **The viewer's mic is a microphone on the host.** The host makes a PipeWire
+  node of class `Audio/Source` (an output stream, not autoconnected), named
+  `broremote.mic.<token>.<session>` with the description
+  "broremote: <viewer host> mic", that exists only while that lane does, so
+  anything recording from it (bro.mic, stt, wake, any program) hears the
+  viewer. With `mic_as_default` it is the default source meanwhile: the host
+  sets `default.configured.audio.source` in the "default" metadata and puts
+  back the previous value (or clears it) when the last such node goes. The
+  node does not write WirePlumber's restore state (`state.restore-props` /
+  `state.restore-target` false), so it leaves nothing behind.
+- **The host's audio** is the default sink's monitor (`stream.capture.sink`),
+  so it is what the machine plays, bro's output included, with no
+  per-application wiring. It works even with no real output: the halo's
+  default sink is the null "Dummy Output", whose monitor carries everything.
+- **The viewer's devices** are Windows' communications-default mic, opened
+  with `AudioCategory_Communications` so Windows applies its voice processing
+  (echo cancellation where the driver offers it; the render endpoint is named
+  as the echo reference through `IAcousticEchoCancellationControl` when that
+  exists), and the console-default speakers. Shared mode, event driven,
+  `AUTOCONVERTPCM` (the device's mix format is never our problem), MMCSS
+  "Pro Audio". Whether echo cancellation is on is reported, as far as
+  Windows says (`IAudioEffectsManager`).
+- **Jitter buffers** on both receivers: fill to a target (20 ms) before
+  playing, play silence and refill after running dry (an underrun), and
+  drop the oldest audio down to the target when beyond the bound (80 ms),
+  so a stall or clock drift never turns into lasting latency. One
+  consequence: while nothing records from the mic node, PipeWire does not
+  run it, and the host's buffer drops the viewer's audio at the bound; the
+  "dropped frames" count grows (by design, not loss), and the mic latency
+  reads "not playing yet" until something records.
+- **Latency first.** Both one-way latencies are measured, not estimated: the
+  viewer keeps the host clock offset from Ping / Pong on the audio lane (the
+  smallest round trip of recent samples), the downlink pairs each frame's
+  host capture stamp with when the speakers play it here, and the uplink
+  comes back in `AudioStats` (a viewer capture stamp and the host time its
+  node played it). Nothing is batched: a packet is one device period.
+- **Isolation.** The lane is its own connection with its own threads at both
+  ends; its loss, a host without audio devices (`AudioStarted` with both
+  directions off and why), or a device that will not open changes nothing
+  for video or input. A host whose lane backs up drops its oldest unsent
+  `AudioDown` (more than 16 queued) rather than queueing.
+
+**Why not broaudio's device layer.** It is compiled into the whole broaudio
+engine (synthesis, effects, spatial: far more than a lane needs), it uses SDL
+on Windows (no Communications category, so no echo cancellation, and SDL
+would be a library dependency where only the viewer tool may have one), and it
+has no virtual source or sink monitor. broremote's rule is platform APIs and
+siblings, so it has its own small layer (audio_device.h): about 400 lines each
+over PipeWire and over WASAPI.
 
 ### Server to client
 
@@ -210,6 +287,8 @@ struct ServerConfig {
     uint32_t max_frames_in_flight = 2;     // unacked frames per client before encoding pauses
     uint32_t keyframe_interval_s = 0;      // 0: keyframes only on demand
     std::string name = "broremote";
+    ServerAudioConfig audio;               // 1.3: enabled, backend, mic_as_default, jitter_ms 20,
+                                           // max_buffer_ms 80, period_ms 5
 };
 class Server {
 public:
@@ -237,8 +316,20 @@ public:
     // The stream being sent ({codec, width, height, bitrate_kbps}), or
     // nullopt before the first frame is encoded.
     std::optional<StreamInfo> stream() const;
+    // Each audio lane: the viewer's name, directions and mutes, its mic
+    // node and whether it is the default source, the mic buffer's depth.
+    std::vector<AudioViewer> audio_viewers() const;
 };
 ```
+
+Audio (src/server_audio.cpp): the backend is made at the first `AudioStart`
+(PipeWire where the build has it, `BROREMOTE_PIPEWIRE`, on when pkg-config
+finds libpipewire-0.3). Each lane gets an `AudioPeer` with its own mic node
+and jitter buffer, fed by `AudioUp` on the I/O thread and drained on
+PipeWire's realtime thread. One monitor capture is shared: its realtime
+callback writes an SPSC ring, and an audio thread sends each period to every
+lane that wants it as `AudioDown`, and `AudioStats` to each lane with a mic
+twice a second. `Stats` counts audio lanes and the packets each way.
 
 Internally: an I/O thread runs the accept/read/write loop (non-blocking
 sockets around one poll, woken by a waker when the encode thread queues
@@ -383,7 +474,18 @@ NV12): H.264 1.9-2.3 ms in hardware, HEVC 1.4-1.6 ms. Encode on the halo
   the frame counter as 32 one-bit blocks, so motion, channel order and
   dropped frames all show. With a codec this machine cannot encode it says
   so and exits 1. Input it receives is printed to stderr; pointer motion
-  moves the cursor it reports.
+  moves the cursor it reports. Audio lanes are on where the platform backend
+  is (`--no-audio` turns them off; `--mic-default` makes each viewer's mic
+  the default source); each change in the audio lanes is printed.
+- `broremote tone --out WAV [--hz F] [--amplitude A] [--seconds S]`: writes
+  a sine WAV (for `--mic-file`). `broremote wav-info WAV`: the level and
+  dominant frequency of the part with sound in it (or "digital silence").
+- `broremote audio-devices`: the mics and speakers here, by the names
+  `--mic-device` / `--speaker-device` match. `broremote mic-check [--seconds
+  S] [--out WAV] [--play-tone HZ] [--device NAME]`: records the mic an audio
+  lane would send (the communications default) and prints its level and
+  whether echo cancellation is on; `--play-tone` plays a tone meanwhile,
+  so the recording shows what echo cancellation leaves of it.
 - `broremote codecs`: what this build can encode and decode here.
 - `broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS]
   [--fps N] [--keyframe-every N] [--out FILE] [--content scroll|desktop]`:
@@ -412,6 +514,18 @@ together, so the lane costs no extra connect time. Stderr says "input on
 its own lane", or why not (an older server, the second ssh failing); input
 then goes on the control connection as before. `--no-input-lane` turns it
 off.
+
+Audio lane (protocol 1.3): once video is up, the viewer opens a third
+connection the same way on its own thread and starts an `AudioSession`
+(audio_client.h, a library part: no SDL in it). Flags: `--no-audio-lane`,
+`--no-mic` (hear only), `--no-audio-playback` (send only), `--mic-device` /
+`--speaker-device NAME` (default: the communications mic, the default
+output), `--mic-tone HZ` / `--mic-file WAV` (sent instead of the mic, paced
+in real time), `--record-audio WAV` (what the speakers were handed),
+`--audio-buffer MS`, `--audio-stats` (a line a second). Ctrl+Alt+M mutes the
+mic and Ctrl+Alt+A the host's audio (not forwarded); the title shows both
+latencies, and the closing report gives each latency's mean / min / max with
+the buffers' underruns and drops.
 
 Which ssh: `--ssh-program`, else `$BROREMOTE_SSH`, else on Windows the
 system's own OpenSSH (`%SystemRoot%\System32\OpenSSH\ssh.exe`) when it is
@@ -535,6 +649,35 @@ screen windowed (3.5 fullscreen). The ack window of 2 closed on 2-3 frames
 in 1500; a window of 1 closes on 49 and adds 1.1 ms, so acking on receipt
 instead of after decode, or a wider window, would change nothing at 60 fps.
 
+With the audio lane carrying a tone up and the host's audio down at the same
+time (the setup above, scrolling pattern, two runs each way): 11.6 and 11.9 ms
+mean against 12.5 and 12.5 without it; the parts are the same within noise.
+
+### Audio, measured
+
+Windows to the halo over ssh (the system's ssh, a tone of 0.5 amplitude in
+place of the mic, `serve-test --mic-default`), each one-way latency from
+capture to output at the other end:
+
+- **Mic to the host's node:** 440.15 Hz at -9.03 dBFS, exactly what was sent,
+  recorded from the node with `pw-record`; bro.mic in a headless bro on the
+  halo (the node being the default source) hears 440.0 Hz at -9.03 dBFS,
+  peak 0.500. Latency 24.7-25.2 ms with the host buffer at 9-14 ms (another
+  run: mean 30.6, 29.7-32.1).
+- **Host to the speakers:** a 1000 Hz tone played on the halo (`pw-play`)
+  arrives at 1000.00 Hz, peak 0.250 (as played). Latency 34-42 ms; about 10
+  of it is the playback buffer here, and the rest the host's monitor period,
+  the Voicemeeter virtual device's own buffering and WASAPI's.
+- Round trip on the lane 1.8-2.4 ms; no underruns either way.
+
+In process (tests/test_audio.cpp, paced 10 ms periods): 20-25 ms up, about 30
+down, with the reported values within 0.6 ms of the measured onsets.
+
+The real mic could not be checked on the development machine: every capture
+endpoint there is a Voicemeeter bus, and none carried sound (ffmpeg's dshow
+capture agrees), so the run used `--mic-tone`; for the same reason echo
+cancellation reads "not reported" (virtual devices offer none).
+
 ## The bro side (not in this repo)
 
 bro links broremote under `BRO_WITH_REMOTE`. A small host adapter in bro
@@ -551,9 +694,10 @@ gated by `BROREMOTE_ENABLE_API`, mounted by bro's `installSiblingApis`).
 ### The JavaScript binding (src/api)
 
 `bro.remote` owns the Server: `host({socket, codecs, bitrateKbps, fps,
-name})` makes one (the same options again keep it; others replace it),
+name, audio, micAsDefault})` makes one (the same options again keep it; others replace it),
 `stop()` destroys it, `status()` reports it (clients, the stream from
-`Server::stream()`, `stats()`), `codecs()` is what brovideo can encode here
+`Server::stream()`, `stats()`, and `audio`: enabled, micAsDefault and the
+`audio_viewers()`), `codecs()` is what brovideo can encode here
 (`brovideo::codecs(Direction::Encode)`), and
 `attach` / `detach` events fire as the client count changes. The binding
 never names the host: the host sets `HostHooks` before `installRemote()`,
@@ -613,6 +757,17 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   the hook calls each makes, attach and detach from a real Client, a CPU
   frame through the server the hook handed over and the stream it shows in
   `status()`, listeners added and removed, a GC-stress loop, and
-  `shutdownRemote()`.
+  `shutdownRemote()`; the audio options and `status().audio`.
+- Audio (tests/test_audio.cpp): PCM encode/decode and channel conversion,
+  the ring and the jitter buffer (priming, underrun, the bound), the audio
+  wire messages; then a loopback with paced devices in process: a Server
+  and an `AudioSession` over a real local connection, a 440 Hz tone up and
+  1000 Hz down at once, each checked for frequency (within 1 Hz), level
+  (within 0.5 dB) and onset latency (both reported latencies within 5 ms of
+  the measured onsets); mutes; the audio lane ending while the control
+  connection and input go on, and a second audio lane refused; the control
+  connection ending the audio lane; a host with audio off; and the lane's
+  protocol errors (a wrong token; `AudioUp` before `AudioStart`).
+  The platform backends are checked by hand (numbers above).
 - End to end: `serve-test` on the halo, `broremote-view --ssh halo
   --frames N --check-pattern` on Windows (by hand; numbers above).

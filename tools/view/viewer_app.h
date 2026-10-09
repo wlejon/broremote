@@ -26,6 +26,7 @@ struct ViewerOptions {
     bool check_pattern = false; // compare the last picture with broremote serve-test's pattern
     bool vsync = true;
     bool stats = false;         // a timing breakdown line on stderr every second
+    bool audio_stats = false;   // an audio line on stderr every second
     uint32_t latency_probes = 0;  // send this many latency probes (serve-test --latency), report, exit
     bool probe_motion = false;    // while probing, also keep the pointer moving (small messages all the time)
     bool fullscreen = false;
@@ -86,6 +87,10 @@ private:
     bool timed_out_ = false;
     bool fitted_ = false;
     bool swallow_enter_ = false;
+    SDL_Scancode swallowed_ = SDL_SCANCODE_UNKNOWN;  // a mute shortcut's key, whose release is not sent
+    std::string audio_text() const;                  // the audio part of the title
+    void audio_report();                             // the closing report's audio part, --record-audio
+    std::vector<double> audio_up_ms_, audio_down_ms_;  // one-way audio latency, sampled each second
     uint64_t displayed_ = 0;
     std::vector<double> latency_ms_;  // packet received -> presented
 

@@ -7,6 +7,7 @@
 // and publishes it as the newest frame. The render thread takes only the
 // newest: frames it never took are simply replaced, never queued.
 
+#include "broremote/audio_client.h"
 #include "broremote/client.h"
 #include "connect.h"
 #include "latency.h"
@@ -24,8 +25,23 @@
 
 namespace broremote::view {
 
+// The audio lane (protocol 1.3): a further connection, opened like the
+// control connection, carrying the host's audio here and this mic there.
+struct AudioOptions {
+    bool enabled = true;          // --no-audio-lane
+    bool mic = true;              // --no-mic
+    bool playback = true;         // --no-audio-playback
+    double mic_tone_hz = 0;       // --mic-tone HZ: a tone instead of the mic
+    std::string mic_file;         // --mic-file WAV: the file (looped) instead of the mic
+    std::string record_file;      // --record-audio WAV: what the speakers played, written on exit
+    uint32_t jitter_ms = 20;      // --audio-buffer MS
+    std::string mic_device;       // --mic-device NAME (part of it); empty: the communications default
+    std::string speaker_device;   // --speaker-device NAME; empty: the default
+};
+
 struct SessionOptions {
     tools::ConnectTarget target;
+    AudioOptions audio;
     std::string client_name = "broremote-view";
     // Send SetCodec with the codecs this machine decodes (so a server that
     // could fall back to one of them does). Off: take whatever it sends.
@@ -85,6 +101,34 @@ public:
     void note_presented(uint64_t frame_id, Clock::time_point when) { latency_.on_presented(frame_id, when); }
     // Sends one probe (a press and release of KEY_F13) when none is open. False otherwise.
     bool probe();
+
+    // The audio lane. False when there is none (not yet, refused, or off).
+    bool audio_stats(AudioSession::Stats& out) const;
+    void toggle_mic_mute();
+    void toggle_playback_mute();
+    [[nodiscard]] bool mic_muted() const;
+    [[nodiscard]] bool playback_muted() const;
+    // What the speakers played so far (first channel), for --record-audio
+    // and the closing report; the rate is 0 when nothing was recorded.
+    void recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_t& channels) const;
+
+private:
+    void audio_thread(SessionOptions options, brolink::lanes::Grant grant);
+    // The audio recording, filled on the speakers' realtime thread: no
+    // allocation there, so it is sized up front and stops when full.
+    struct Recording {
+        std::vector<float> frames;
+        std::atomic<size_t> used{0};
+        uint32_t rate = 0, channels = 0;
+    };
+    std::unique_ptr<Recording> recording_;
+    std::thread audio_thread_;
+    std::shared_ptr<Stream> audio_stream_;      // to abandon the audio lane's connect
+    std::unique_ptr<AudioSession> audio_;       // under m_
+    std::vector<float> mic_file_;               // --mic-file, mono at mic_file_rate_
+    uint32_t mic_file_rate_ = 0;
+    size_t mic_file_pos_ = 0;
+    std::unique_ptr<audio::Tone> mic_tone_;
 
 private:
     struct Item {
