@@ -154,14 +154,20 @@ speakers (WASAPI)  <-- jitter buffer <--AudioDown-- default output's monitor
 
 - **The viewer's mic is a microphone on the host.** The host makes a PipeWire
   node of class `Audio/Source` (an output stream, not autoconnected), named
-  `broremote.mic.<token>.<session>` with the description
+  `broremote.mic.<viewer host>.<run>.<session>` with the description
   "broremote: <viewer host> mic", that exists only while that lane does, so
   anything recording from it (bro.mic, stt, wake, any program) hears the
   viewer. With `mic_as_default` it is the default source meanwhile: the host
   sets `default.configured.audio.source` in the "default" metadata and puts
   back the previous value (or clears it) when the last such node goes. The
-  node does not write WirePlumber's restore state (`state.restore-props` /
-  `state.restore-target` false), so it leaves nothing behind.
+  node does not write WirePlumber's per-stream restore state
+  (`state.restore-props` / `state.restore-target` false). One trace does
+  remain with `mic_as_default`: WirePlumber appends the node's name to its
+  history of configured default sources (`default.configured.audio.source.N`
+  in ~/.local/state/wireplumber/default-nodes). The name carries a random
+  token drawn per server process as well as the session id (which restarts
+  at 1 with each server), so a later node never matches an old entry and is
+  never picked as the default unasked; the history is WirePlumber's to trim.
 - **The host's audio** is the default sink's monitor (`stream.capture.sink`),
   so it is what the machine plays, bro's output included, with no
   per-application wiring. It works even with no real output: the halo's

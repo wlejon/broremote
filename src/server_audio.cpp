@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
+#include <random>
 
 namespace broremote {
 
@@ -47,6 +49,20 @@ std::string node_token(const std::string& s) {
     }
     while (!out.empty() && out.back() == '-') out.pop_back();
     return out.empty() ? "viewer" : out;
+}
+
+// Eight hex digits drawn once per process. Session ids restart at 1 with each
+// server, and WirePlumber remembers the names of nodes that were the default
+// source: a name that came back in a later run would be picked as the default
+// again unasked. This makes every run's names new.
+const std::string& run_token() {
+    static const std::string token = [] {
+        std::random_device rd;
+        char buf[16];
+        std::snprintf(buf, sizeof buf, "%08x", static_cast<unsigned>(rd()));
+        return std::string(buf);
+    }();
+    return token;
 }
 
 }  // namespace
@@ -176,7 +192,7 @@ void Server::Impl::start_audio(ClientConn& c, const AudioStartMsg& s) {
         spec.rate = f.rate;
         spec.channels = f.channels;
         spec.period_frames = std::max<uint32_t>(1, f.rate * cfg.audio.period_ms / 1000);
-        spec.name = "broremote.mic." + node_token(p.source) + "." + session;
+        spec.name = "broremote.mic." + node_token(p.source) + "." + run_token() + "." + session;
         spec.description = "broremote: " + p.source + " mic";
         spec.make_default = cfg.audio.mic_as_default;
         std::string err;
