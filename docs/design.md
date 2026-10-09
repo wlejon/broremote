@@ -66,11 +66,10 @@ brovideo's build (`BROVIDEO_WITH_VAAPI`, auto on Linux when libva is found;
 (`brovideo::capabilities()`), so the codec lists the server and viewer offer
 are honest on a box without the hardware.
 
-Dependencies resolve by the ecosystem convention (existing target, then
-`../<name>`, then `third_party/<name>`). brovideo is required: an existing
-`brovideo` target, else `-DBROVIDEO_DIR`, else `../brovideo` (which on Linux
-needs `../brodmabuf` in turn). So is brolink: an existing `brolink` target,
-else `-DBROLINK_DIR`, else `../brolink`. SDL3 for
+Dependencies resolve by the ecosystem convention, cmake/bro_deps.cmake
+(existing target, then the `../<name>` working tree, then the commit pinned in
+CMakeLists.txt, fetched at configure). brovideo is required (on Linux it
+brings brodmabuf in turn), and so is brolink. SDL3 for
 the viewer: an existing `SDL3::SDL3` target, else `find_package(SDL3)`; on
 Windows, when no vcpkg toolchain file points at it, the vcpkg trees at
 `$VCPKG_ROOT`, `../vcpkg` and `../../vcpkg` (triplet x64-windows) are tried,
@@ -608,8 +607,8 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   mapping and clamping, buttons, wheel units and fractions, key codes, no
   auto-repeat, the fullscreen hotkey kept local, release on focus loss; then
   a stream size change and the mapping following it.
-- The binding (tests/test_api.cpp, `BROREMOTE_ENABLE_API`; needs ../bronze
-  and ../brass): a bronze realm with the hooks set and `bro.remote`
+- The binding (tests/test_api.cpp, `BROREMOTE_ENABLE_API`; builds bronze
+  and brass): a bronze realm with the hooks set and `bro.remote`
   installed; option errors, host / same-options no-op / replace / stop and
   the hook calls each makes, attach and detach from a real Client, a CPU
   frame through the server the hook handed over and the stream it shows in

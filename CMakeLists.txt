@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 
 project(broremote VERSION 0.1.0 LANGUAGES CXX)
 
+# Dependencies (cmake/bro_deps.cmake): an outer project's target wins (under bro
+# these are all bro's), else the ../<name> working tree beside the top-level
+# project, else the pinned commit, fetched at configure.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/bro_deps.cmake)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -70,39 +75,17 @@ if(WIN32)
     target_compile_definitions(broremote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 endif()
 # ---- brolink: the transport ---------------------------------------------------------
-# An existing brolink target (bro, or bromux beside it, added it), else
-# -DBROLINK_DIR, else a checkout beside this one (../brolink).
-if(NOT TARGET brolink)
-    if(DEFINED BROLINK_DIR AND EXISTS "${BROLINK_DIR}/CMakeLists.txt")
-        # Explicit BROLINK_DIR supplied
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brolink/CMakeLists.txt")
-        set(BROLINK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brolink" CACHE PATH "brolink source tree")
-    endif()
-    if(NOT BROLINK_DIR OR NOT EXISTS "${BROLINK_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR
-            "brolink not found: check it out beside this repository (../brolink) or pass -DBROLINK_DIR=<path>.")
-    endif()
-    set(BROLINK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${BROLINK_DIR}" "${CMAKE_BINARY_DIR}/brolink" EXCLUDE_FROM_ALL)
-endif()
+# A bro_dependency (cmake/bro_deps.cmake): an existing brolink target (bro, or
+# bromux beside it, added it), else ../brolink, else the pinned commit.
+bro_dependency(brolink GITHUB wlejon/brolink REF b393d00256a47445b594fad06779fb546d7e0f65
+               OPTIONS BROLINK_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brolink::brolink)
 # ---- brovideo: the codecs ----------------------------------------------------------
-# An existing brovideo target (bro builds it), else -DBROVIDEO_DIR, else a
-# checkout beside this one (../brovideo). Its backends are its own options
-# (BROVIDEO_WITH_VAAPI, BROVIDEO_WITH_MF); on Linux it needs ../brodmabuf.
-if(NOT TARGET brovideo)
-    if(DEFINED BROVIDEO_DIR AND EXISTS "${BROVIDEO_DIR}/CMakeLists.txt")
-        # Explicit BROVIDEO_DIR supplied
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../brovideo/CMakeLists.txt")
-        set(BROVIDEO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../brovideo" CACHE PATH "brovideo source tree")
-    endif()
-    if(NOT BROVIDEO_DIR OR NOT EXISTS "${BROVIDEO_DIR}/CMakeLists.txt")
-        message(FATAL_ERROR
-            "brovideo not found: check it out beside this repository (../brovideo) or pass -DBROVIDEO_DIR=<path>.")
-    endif()
-    set(BROVIDEO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${BROVIDEO_DIR}" "${CMAKE_BINARY_DIR}/brovideo" EXCLUDE_FROM_ALL)
-endif()
+# An existing brovideo target (bro builds it), else ../brovideo, else the pinned
+# commit. Its backends are its own options (BROVIDEO_WITH_VAAPI,
+# BROVIDEO_WITH_MF); on Linux it brings brodmabuf.
+bro_dependency(brovideo GITHUB wlejon/brovideo REF 6182bff5a5c619ba5756615aee99a271969c9ed3
+               OPTIONS BROVIDEO_BUILD_TESTS=OFF)
 target_link_libraries(broremote PUBLIC brovideo::brovideo)
 
 if(MSVC)
@@ -200,30 +183,14 @@ else()
 endif()
 
 # ---- the JavaScript binding (broremote_api) -----------------------------------------
-# bronze, the JavaScript runtime the binding is written against: an existing
-# bronze_runtime_shared target (bro's), else a checkout beside this one
-# (../bronze, with ../brass beside it, which bronze resolves itself), or an
-# explicit -DBRONZE_DIR. No vendored fallback: the binding crosses bronze's C++
-# embed boundary, so it has to build with the bronze (and the compiler and
-# CRT) of whatever it is linked into.
+# bronze, the JavaScript runtime the binding is written against (it brings its
+# code generator, brass): an existing bronze_runtime_shared target (bro's), else
+# ../bronze, else the pinned commit. The binding crosses bronze's C++ embed
+# boundary, so it has to build with the bronze (and the compiler and CRT) of
+# whatever it is linked into.
 if(BROREMOTE_ENABLE_API)
-    if(NOT TARGET bronze_runtime_shared)
-        set(BRONZE_BUILD_SHARED_RUNTIME ON CACHE BOOL "" FORCE)
-        set(BRONZE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        if(DEFINED BRONZE_DIR AND EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-            # Explicit BRONZE_DIR supplied
-        elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bronze/CMakeLists.txt")
-            set(BRONZE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/../bronze/CMakeLists.txt")
-            set(BRONZE_DIR "${CMAKE_SOURCE_DIR}/../bronze" CACHE PATH "bronze source tree")
-        endif()
-        if(NOT BRONZE_DIR OR NOT EXISTS "${BRONZE_DIR}/CMakeLists.txt")
-            message(FATAL_ERROR
-                "bronze not found: check it out beside this repository (../bronze, with ../brass beside it) "
-                "or pass -DBRONZE_DIR=<path>, or configure with -DBROREMOTE_ENABLE_API=OFF.")
-        endif()
-        add_subdirectory("${BRONZE_DIR}" "${CMAKE_BINARY_DIR}/bronze-build" EXCLUDE_FROM_ALL)
-    endif()
+    bro_dependency(bronze GITHUB wlejon/bronze REF 15ce4cf5fc25d8afe03882985ae95adcba46a6a9 TARGET bronze_runtime_shared
+                   OPTIONS BRONZE_BUILD_SHARED_RUNTIME=ON BRONZE_BUILD_TESTS=OFF)
     message(STATUS "broremote: JavaScript binding (broremote_api) enabled")
     add_subdirectory(src/api)
 endif()

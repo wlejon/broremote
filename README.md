@@ -33,12 +33,15 @@ screen (docs/design.md has the details).
 
 ## Building
 
-The core needs a C++20 compiler, CMake 3.24, and two siblings checked out
-beside this repository: brolink, the local IPC and ssh transport
-(`../brolink`, or `-DBROLINK_DIR=<path>`), and brovideo (`../brovideo`, or
-`-DBROVIDEO_DIR=<path>`; on Linux brovideo needs `../brodmabuf` too). Which
-codecs are built is brovideo's choice (`BROVIDEO_WITH_VAAPI`, on on Linux
-when libva is found; `BROVIDEO_WITH_MF`, on on Windows).
+The core needs a C++20 compiler, CMake 3.24, and two siblings: brolink, the
+local IPC and ssh transport, and brovideo (which on Linux brings brodmabuf).
+A plain `git clone` is enough: there are no submodules. Each sibling is a
+`bro_dependency()` pin in `CMakeLists.txt` (`cmake/bro_deps.cmake`): an
+existing target wins, then a working tree at `../<name>`, then the pinned
+commit, fetched at configure (override with
+`-DFETCHCONTENT_SOURCE_DIR_<NAME>=<path>`). Which codecs are built is
+brovideo's choice (`BROVIDEO_WITH_VAAPI`, on on Linux when libva is found;
+`BROVIDEO_WITH_MF`, on on Windows).
 
 Windows (Visual Studio 2022; one build dir, the config picked at build time):
 ```bash
@@ -57,8 +60,8 @@ ctest --test-dir build
 Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
 `BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_BUILD_VIEWER` (on when SDL3 is
 found), `BROREMOTE_ENABLE_API` (off; the
-`bro.remote` JavaScript binding, which bro turns on; it needs ../bronze and
-../brass).
+`bro.remote` JavaScript binding, which bro turns on; it adds bronze and,
+through it, brass, the same way).
 
 SDL3 for the viewer comes from an existing `SDL3::SDL3` target or
 `find_package(SDL3)`; on Windows a vcpkg tree at `$VCPKG_ROOT`, `../vcpkg` or

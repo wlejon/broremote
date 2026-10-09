@@ -40,7 +40,7 @@ if(TARGET broremote_view_core)
     broremote_copy_runtime_dlls(test_view)
 endif()
 
-# The JavaScript binding in a bronze realm (needs ../bronze and ../brass).
+# The JavaScript binding in a bronze realm (BROREMOTE_ENABLE_API adds bronze).
 # bronze builds its shared runtime into its own directory; on Windows the
 # DLL is copied beside the test, where the loader looks.
 if(TARGET broremote_api)
