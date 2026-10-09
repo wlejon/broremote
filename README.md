@@ -25,7 +25,7 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 | `broremote proxy`, `serve-test`, `codecs`, `encode`, `record` | done |
 | Codecs: Raw, VA-API encode (HEVC default, H.264, AV1), Media Foundation decode | in brovideo |
 | `broremote-view` (SDL3): Windows decodes; Linux shows Raw only, so far | done; a stopgap, kept until bro's viewer is accepted |
-| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' helmremote show it |
+| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' helmremote show it, at the SDL viewer's latency (docs/design.md) |
 | Audio lane (1.3): raw PCM both ways; the viewer's mic is a PipeWire source on the host, the host's output plays on the viewer (WASAPI) | done, tested Windows to Linux |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | done (helm `--remote`) |
 

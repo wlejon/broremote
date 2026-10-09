@@ -700,6 +700,26 @@ screen windowed (3.5 fullscreen). The ack window of 2 closed on 2-3 frames
 in 1500; a window of 1 closes on 49 and adds 1.1 ms, so acking on receipt
 instead of after decode, or a wider window, would change nothing at 60 fps.
 
+The bro viewer (helmapps' helmremote, `bro helmremote HOST -s lat
+--latency-test 100`: a `<remoteview>` over `bro.remote.connect`) against the
+SDL viewer, back to back on the same server (scrolling pattern, mean / p90 /
+max, ms):
+
+| Run | SDL viewer | bro viewer |
+|---|---|---|
+| 1 | 11.55 / 14.71 / 24.17 | 11.4 / 14.1 / 15.9 |
+| 2 | 11.82 / 14.74 / 16.69 | 11.9 / 14.1 / 19.9 |
+| 3 | 11.83 / 15.10 / 26.19 | 12.1 / 14.7 / 16.9 |
+
+The parts differ in two places that roughly cancel. bro's decode is 2.9-3.1
+ms against 3.7-3.8, because its pictures stay on the GPU: the decoder's D3D11
+texture converts on the GPU into a BGRA texture that Vulkan imports and
+composites, with nothing read back. bro's present is 1.2-1.35 ms against
+0.35, because the SDL viewer presents when a picture is decoded, while bro's
+loop presents every refresh (FIFO, 2.8 ms at 360 Hz): a picture that arrives
+mid-refresh waits for the next pass. A loop that held unchanged frames on
+Windows and woke for a picture would recover that millisecond.
+
 With the audio lane carrying a tone up and the host's audio down at the same
 time (the setup above, scrolling pattern, two runs each way): 11.6 and 11.9 ms
 mean against 12.5 and 12.5 without it; the parts are the same within noise.
