@@ -187,6 +187,7 @@ Value statusObject() {
     stats.set("submitted", static_cast<double>(s.submitted));
     stats.set("encoded", static_cast<double>(s.encoded));
     stats.set("keyframes", static_cast<double>(s.keyframes));
+    stats.set("repeats", static_cast<double>(s.repeats));
     stats.set("replaced", static_cast<double>(s.replaced));
     stats.set("unwatched", static_cast<double>(s.unwatched));
     stats.set("failed", static_cast<double>(s.failed));

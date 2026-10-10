@@ -103,7 +103,11 @@ public:
     struct Stats {
         uint64_t submitted = 0;   // frames passed to submit()
         uint64_t encoded = 0;     // frames encoded and sent
-        uint64_t keyframes = 0;   // of those, keyframes
+        uint64_t keyframes = 0;   // keyframes sent (of the frames and the repeats)
+        // The last picture encoded again with no new frame (and sent): while
+        // the screen holds still, to sharpen it, and as the keyframe a viewer
+        // asked for (docs/design.md, Codecs: "Still screens").
+        uint64_t repeats = 0;
         uint64_t replaced = 0;    // released unencoded: replaced by a newer submit
         uint64_t unwatched = 0;   // released unencoded: no client attached
         uint64_t failed = 0;      // released unencoded: the encoder failed

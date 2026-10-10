@@ -253,51 +253,67 @@ void test_keyframes_and_two_clients() {
     Viewer a;
     CHECK(a.open(dial(name)));
     WAIT(server->client_count() == 1, 5000);
+    FrameSource::Slot* last = nullptr;
     for (uint32_t i = 0; i < 3; ++i) {
-        src.submit(*server, 40, 30, i);
+        last = &src.submit(*server, 40, 30, i);
         WAIT(a.picture_count() == i + 1, 5000);
     }
     CHECK_EQ(server->stats().keyframes, uint64_t(1));
+    settle(100);
+    CHECK_EQ(a.picture_count(), size_t(3));  // Raw is lossless: no sharpening repeats
+    CHECK_EQ(server->stats().repeats, uint64_t(0));
 
     Viewer b;
     CHECK(b.open(dial(name)));
     WAIT(server->client_count() == 2, 5000);
-    // The joiner is told the current stream at once.
+    // The joiner is told the current stream at once, and on a still screen
+    // (no new frame) gets the last picture again as a keyframe, at once; so
+    // does the other client (one packet for both).
     WAIT(b.config_count() == 1, 5000);
     CHECK_EQ(b.last_config().stream_id, uint64_t(1));
-    auto& s3 = src.submit(*server, 40, 30, 3);
     WAIT(a.picture_count() == 4 && b.picture_count() == 1, 5000);
     CHECK(b.picture(0).keyframe);
     CHECK(a.last_picture().keyframe);
-    CHECK(b.picture(0).pixels == s3.pixels);
-    CHECK(a.last_picture().pixels == s3.pixels);
+    CHECK(b.picture(0).pixels == last->pixels);
+    CHECK(a.last_picture().pixels == last->pixels);
     CHECK_EQ(server->stats().keyframes, uint64_t(2));
+    CHECK_EQ(server->stats().repeats, uint64_t(1));
+    CHECK_EQ(server->stats().encoded, uint64_t(3));
     // Both get the following predicted frames.
-    auto& s4 = src.submit(*server, 40, 30, 4);
+    auto& s3 = src.submit(*server, 40, 30, 3);
     WAIT(a.picture_count() == 5 && b.picture_count() == 2, 5000);
+    CHECK(!b.last_picture().keyframe);
+    CHECK(b.last_picture().pixels == s3.pixels);
+    auto& s4 = src.submit(*server, 40, 30, 4);
+    WAIT(a.picture_count() == 6 && b.picture_count() == 3, 5000);
     CHECK(!b.last_picture().keyframe);
     CHECK(b.last_picture().pixels == s4.pixels);
 
-    check::phase("keyframe on request");
+    check::phase("keyframe on request: the last picture, at once");
     b.client().request_keyframe();
-    settle(50);
-    src.submit(*server, 40, 30, 5);
-    WAIT(a.picture_count() == 6 && b.picture_count() == 3, 5000);
+    WAIT(a.picture_count() == 7 && b.picture_count() == 4, 5000);
     CHECK(b.last_picture().keyframe);
+    CHECK(b.last_picture().pixels == s4.pixels);
     CHECK_EQ(server->stats().keyframes, uint64_t(3));
+    CHECK_EQ(server->stats().repeats, uint64_t(2));
+    settle(100);
+    CHECK_EQ(a.picture_count(), size_t(7));
 
     check::phase("two clients: one slow client pauses both; its leaving resumes");
     b.auto_ack = false;
     src.submit(*server, 40, 30, 6);
-    WAIT(a.picture_count() == 7 && b.picture_count() == 4, 5000);
-    src.submit(*server, 40, 30, 7);
     WAIT(a.picture_count() == 8 && b.picture_count() == 5, 5000);
+    src.submit(*server, 40, 30, 7);
+    WAIT(a.picture_count() == 9 && b.picture_count() == 6, 5000);
     src.submit(*server, 40, 30, 8);  // b is at its window: waits
+    b.client().request_keyframe();   // and so does a repeat
     settle(200);
-    CHECK_EQ(a.picture_count(), size_t(8));
+    CHECK_EQ(a.picture_count(), size_t(9));
     b.close();  // the slow client leaves
     WAIT(server->client_count() == 1, 5000);
-    WAIT(a.picture_count() == 9, 5000);
+    WAIT(a.picture_count() == 10, 5000);
+    settle(100);
+    CHECK_EQ(a.picture_count(), size_t(10));  // the frame; the request went with it
     CHECK(a.with([&] { return a.decode_errors.empty(); }));
     CHECK(b.with([&] { return b.decode_errors.empty(); }));
     a.close();

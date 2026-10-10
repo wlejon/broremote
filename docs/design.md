@@ -349,7 +349,7 @@ public:
     size_t client_count() const;
     bool wants_frames() const;   // false when no client is attached: the host can skip submitting
     const std::string& socket_path() const;
-    Stats stats() const;         // submitted / encoded / keyframes / replaced / unwatched / failed / streams
+    Stats stats() const;         // submitted / encoded / keyframes / repeats / replaced / unwatched / failed / streams
     // The stream being sent ({codec, width, height, bitrate_kbps}), or
     // nullopt before the first frame is encoded.
     std::optional<StreamInfo> stream() const;
@@ -511,6 +511,26 @@ What stays in broremote is the policy around them:
   failures) and acks the failed frame anyway.
 - *When to encode.* Only while a client is attached and the ack window is
   open (flow control, above); the host is told through `wants_frames()`.
+- *Still screens.* A host submits only when the screen changed (bro under
+  DRM holds an unchanged frame, so nothing is composited or scanned out).
+  The first frame after a big change is as soft as the 50 ms HRD buffer
+  lets it be: a desktop page at 20 Mbit/s 1080p decodes near 18 dB against
+  50 dB once settled, and without more frames it would stay that way, the
+  text a smear, for as long as the screen holds. So between frames the
+  encode thread repeats the last picture (`Encoder::encode_repeat`, from the
+  encoder's own copy; no frame is held): once a frame interval, predicted,
+  until two packets running are under a quarter of the per-frame budget or
+  a second has passed, and only while the ack window is open; a new frame
+  supersedes it at once. On the halo at 20 Mbit/s that takes HEVC from
+  18 dB back to 49.9 in about 25 repeats (0.4 s), AV1 in 17, H.264 in 45
+  (brovideo's test_vaapi measures it). HEVC never codes a still picture as
+  empty (it levels off near a seventh of the budget), hence a quarter, and
+  the frames after a keyframe that overdrew the HRD buffer come out starved
+  small, hence two running. A keyframe asked for (a viewer joining a still
+  screen, a `RequestKeyframe`) is made the same way at once instead of
+  waiting for the screen to change, then sharpened. Raw is lossless: only
+  the keyframes. Repeats carry no `FrameTiming` (no host frame is behind
+  them), so the latency figures leave them out; `Stats::repeats` counts them.
 - *Reconfigure.* A size or bitrate change reconfigures the encoder in place;
   a codec change makes a new one. Either way a new `StreamConfig` goes out.
 - *Cropping.* The `StreamConfig` size is the truth: a decoded picture can be
