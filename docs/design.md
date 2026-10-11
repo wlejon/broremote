@@ -75,7 +75,7 @@ tests/          ctest suite
 
 Nothing in broremote opens a window: it is a library plus a headless CLI.
 The viewer with a display is bro's `<remoteview>` over `bro.remote.connect`
-(helmapps' helmremote); an SDL viewer, `broremote-view`, came first and was
+(helmapps' remote app); an SDL viewer, `broremote-view`, came first and was
 removed once that one matched it (its scripted modes are `broremote probe`).
 
 CMake target `broremote` (alias `broremote::broremote`). Options:
@@ -725,7 +725,7 @@ screen windowed (3.5 fullscreen). The ack window of 2 closed on 2-3 frames
 in 1500; a window of 1 closes on 49 and adds 1.1 ms, so acking on receipt
 instead of after decode, or a wider window, would change nothing at 60 fps.
 
-The bro viewer (helmapps' helmremote, `bro helmremote HOST -s lat
+The bro viewer (helmapps' remote app, `bro remote HOST -s lat
 --latency-test 100`: a `<remoteview>` over `bro.remote.connect`) against the
 SDL viewer, back to back on the same server (scrolling pattern, mean / p90 /
 max, ms):

@@ -24,7 +24,7 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 | Server (I/O + encode threads, ack window, keyframes, input, cursor) and Client | done, tested on Windows and Linux |
 | `broremote proxy`, `serve-test`, `codecs`, `encode`, `record`, `probe` | done |
 | Codecs: Raw, VA-API encode (HEVC default, H.264, AV1), Media Foundation decode | in brovideo |
-| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' helmremote show it; `broremote probe` runs it with no window for scripted checks |
+| `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' remote app show it; `broremote probe` runs it with no window for scripted checks |
 | Audio lane (1.3): raw PCM both ways; the viewer's mic is a PipeWire source on the host, the host's output plays on the viewer (WASAPI) | done, tested Windows to Linux |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | done (helm `--remote`) |
 
@@ -62,7 +62,7 @@ Options: `BROREMOTE_BUILD_TESTS` (on; only for a top-level build),
 `BROREMOTE_BUILD_TOOLS` (on), `BROREMOTE_ENABLE_API` (off; the
 `bro.remote` JavaScript binding, which bro turns on; it adds bronze and,
 through it, brass, the same way). Nothing here opens a window: the viewer
-with a display is bro's `<remoteview>` (helmapps' helmremote).
+with a display is bro's `<remoteview>` (helmapps' remote app).
 
 Tests use ffmpeg as an oracle when it is on PATH (never linked).
 
@@ -72,7 +72,7 @@ On the host (Linux with VA-API):
 ```bash
 broremote serve-test --codec h264 --size 1920x1080   # a server fed a moving test pattern
 ```
-To watch and drive it, use bro's viewer (`bro helmremote HOST`, from
+To watch and drive it, use bro's viewer (`bro remote HOST`, from
 helmapps). For scripted checks, `broremote probe` is the same viewer
 session with no window:
 ```bash
