@@ -53,6 +53,7 @@ set(BROREMOTE_SOURCES
     src/server_io.cpp
     src/server_encode.cpp
     src/client.cpp
+    src/text_client.cpp
     src/connect.cpp
     src/latency.cpp
     src/viewer.cpp

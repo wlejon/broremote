@@ -71,7 +71,7 @@ int main() {
 
     check::phase("status and codecs before hosting");
     CHECK_EQ(run("JSON.stringify(bro.remote.status())"),
-             std::string(R"({"hosting":false,"socket":null,"socketPath":null,"clients":0,"codec":null,"width":0,"height":0})"));
+             std::string(R"({"hosting":false,"socket":null,"socketPath":null,"clients":0,"textSessions":0,"codec":null,"width":0,"height":0})"));
     CHECK_EQ(run("bro.remote.codecs().includes('raw')"), std::string("true"));
     CHECK_EQ(run("bro.remote.stop()"), std::string("false"));
     CHECK(g_log.calls.empty());
@@ -258,6 +258,24 @@ int main() {
     }
     WAIT(run("(vs.status().cursor || {}).shape") == "text", 5000);
     CHECK_EQ(run("const vc = vs.status().cursor; [vc.x, vc.y, vc.locked].join()"), std::string("5,6,true"));
+
+    check::phase("connect: request() over the text lane");
+    vserver->set_text_handler([](TextRequest r) {
+        std::string s;
+        for (const auto& a : r.argv) s += (s.empty() ? "" : "|") + a;
+        r.reply(r.argv[0] != "fail", s, r.out_arg ? std::string("PNG\0!", 5) : std::string());
+    });
+    run("globalThis.vr = []; vs.request('shot w1 \"a b.png\"', {outArg: 2}).then(r => vr.push(r));"
+        "vs.request(['fail', 'x']).then(r => vr.push(r));");
+    WAIT((api::tickRemote(), ev::drainMicrotasks(), run("vr.length") == "2"), 10000);
+    CHECK_EQ(run("[vr[0].ok, vr[0].text, vr[0].file.length, vr[0].file[3]].join()"),
+             std::string("true,shot|w1|a b.png,5,0"));
+    CHECK_EQ(run("[vr[1].ok, vr[1].text, vr[1].file].join()"), std::string("false,fail|x,"));
+    CHECK_EQ(run("(() => { try { vs.request(42); return 'no' } catch (e) { return e instanceof TypeError ? 'ok' : 'x' } "
+                 "})()"),
+             std::string("ok"));
+    CHECK_EQ(run("(() => { try { vs.request(['view'], {outArg: 1}); return 'no' } catch (e) { return 'ok' } })()"),
+             std::string("ok"));
 
     check::phase("connect: the server goes, close");
     vserver.reset();

@@ -3,6 +3,7 @@
 // request and resize, input, cursor, two clients, protocol errors, and the
 // release callback called exactly once per frame on every path.
 #include "broremote/protocol.h"
+#include "broremote/text_client.h"
 #include "check.h"
 #include "viewer.h"
 
@@ -758,6 +759,250 @@ void test_lanes() {
     }
 }
 
+// The text lane (1.6): text-only sessions, the lane of a viewer's session,
+// replies from any thread (out of order, with files), and the edges.
+void test_text() {
+    check::phase("text: a text-only session");
+    const std::string name = unique_name("text");
+    auto server = make_server(name);
+    if (!server) {
+        CHECK(false);
+        return;
+    }
+    // The host: "echo" answers at once; "later N" answers after N ms from a
+    // thread of its own; "file" writes the out_arg file's bytes.
+    std::vector<std::thread> workers;
+    std::mutex workers_m;
+    server->set_text_handler([&](TextRequest r) {
+        const std::string& cmd = r.argv[0];
+        if (cmd == "echo") {
+            std::string s;
+            for (size_t i = 1; i < r.argv.size(); ++i) s += (i > 1 ? " " : "") + r.argv[i];
+            r.reply(true, s + (r.text_only ? " [text-only]" : " [viewer]"), {});
+        } else if (cmd == "later") {
+            const int ms = std::stoi(r.argv.at(1));
+            std::lock_guard<std::mutex> lk(workers_m);
+            workers.emplace_back([r = std::move(r), ms] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+                r.reply(true, "after " + std::to_string(ms), {});
+            });
+        } else if (cmd == "file") {
+            r.reply(true, "{\"path\":\"" + r.argv.at(r.out_arg) + "\"}", std::string("\x89PNG\r\n\0x", 8));
+        } else {
+            r.reply(false, "no command '" + cmd + "'", {});
+        }
+    });
+    {
+        std::string err;
+        TextClientOptions o;
+        o.name = "agent";
+        auto t = TextClient::open(dial(name), o, &err);
+        CHECK(t != nullptr);
+        if (!t) return;
+        CHECK_EQ(t->welcome().minor, kProtocolMinor);
+        WAIT(server->text_session_count() == 1, 5000);
+        // An agent is not a viewer: no encoder runs for it.
+        CHECK_EQ(server->client_count(), size_t(0));
+        CHECK(!server->wants_frames());
+        FrameSource src;
+        src.submit(*server, 32, 32, 0);
+        settle(50);
+        CHECK_EQ(server->stats().encoded, uint64_t(0));
+        CHECK_EQ(server->stats().unwatched, uint64_t(1));
+
+        TextReply r = t->request_sync({"echo", "a b", "c"});
+        CHECK(r.ok);
+        CHECK_EQ(r.payload, std::string("a b c [text-only]"));
+        r = t->request_sync({"nope"});
+        CHECK(!r.ok);
+        CHECK_EQ(r.payload, std::string("no command 'nope'"));
+        r = t->request_sync({"file", "out.png"}, 1);
+        CHECK(r.ok);
+        CHECK_EQ(r.payload, std::string("{\"path\":\"out.png\"}"));
+        CHECK_EQ(r.file, std::string("\x89PNG\r\n\0x", 8));
+
+        // Several in flight: replies come back as the commands finish.
+        std::mutex m;
+        std::vector<std::string> order;
+        for (int ms : {300, 150, 0}) {
+            t->request({"later", std::to_string(ms)}, 0, [&](TextReply x) {
+                std::lock_guard<std::mutex> lk(m);
+                order.push_back(x.payload);
+            });
+        }
+        CHECK(check::wait_for([&] {
+            std::lock_guard<std::mutex> lk(m);
+            return order.size() == 3;
+        }));
+        CHECK(order == (std::vector<std::string>{"after 0", "after 150", "after 300"}));
+        CHECK_EQ(server->stats().text_requests, uint64_t(6));
+        CHECK_EQ(server->stats().text_replies, uint64_t(6));
+
+        // A request still open when the connection closes is answered (not ok).
+        TextReply pending;
+        bool answered = false;
+        t->request({"later", "2000"}, 0, [&](TextReply x) {
+            std::lock_guard<std::mutex> lk(m);
+            pending = std::move(x);
+            answered = true;
+        });
+        settle(50);
+        t->close();
+        CHECK(check::wait_for([&] {
+            std::lock_guard<std::mutex> lk(m);
+            return answered;
+        }));
+        CHECK(!pending.ok);
+        CHECK(!t->connected());
+        r = t->request_sync({"echo"});
+        CHECK(!r.ok);
+        WAIT(server->text_session_count() == 0, 5000);
+    }
+
+    check::phase("text: beside a viewer, and on its text lane");
+    {
+        Viewer v;
+        CHECK(v.open(dial(name)));
+        WAIT(server->client_count() == 1, 5000);
+        std::string err;
+        auto agent = TextClient::open(dial(name), {}, &err);
+        CHECK(agent != nullptr);
+        if (!agent) return;
+        WAIT(server->text_session_count() == 1, 5000);
+        CHECK_EQ(server->client_count(), size_t(1));  // the agent does not count
+        FrameSource src;
+        for (uint32_t i = 0; i < 3; ++i) {
+            src.submit(*server, 64, 48, i);
+            WAIT(v.picture_count() == i + 1, 5000);
+        }
+        CHECK_EQ(agent->request_sync({"echo", "hi"}).payload, std::string("hi [text-only]"));
+        // The viewer's own text lane, joined with its grant.
+        CHECK(v.client().welcome().grant.has_value());
+        if (!v.client().welcome().grant) return;
+        auto lane = TextClient::join(dial(name), *v.client().welcome().grant, {}, &err);
+        CHECK(lane != nullptr);
+        if (!lane) return;
+        CHECK_EQ(lane->request_sync({"echo", "lane"}).payload, std::string("lane [viewer]"));
+        // The agent leaving changes nothing for the viewer.
+        agent.reset();
+        WAIT(server->text_session_count() == 0, 5000);
+        src.submit(*server, 64, 48, 3);
+        WAIT(v.picture_count() == 4, 5000);
+        // The viewer's session ending ends its text lane.
+        v.close();
+        CHECK(check::wait_for([&] { return !lane->connected(); }));
+        CHECK(!lane->request_sync({"echo"}).ok);
+    }
+
+    check::phase("text: the raw protocol");
+    {
+        // A text-only session is sent no StreamConfig, Video or Cursor.
+        Viewer watcher;
+        CHECK(watcher.open(dial(name)));
+        WAIT(server->client_count() == 1, 5000);
+        RawPeer p(dial(name));
+        HelloMsg h;
+        h.flags = kHelloNoVideo;
+        p.s->write(h.encode());
+        WAIT(p.got(MsgType::Welcome), 5000);
+        FrameSource src;
+        CursorState cs;
+        cs.x = 5;
+        server->set_cursor(cs);
+        for (uint32_t i = 0; i < 2; ++i) {
+            src.submit(*server, 64, 48, i);
+            WAIT(watcher.picture_count() == i + 1, 5000);
+        }
+        p.s->write(TextRequestMsg{9, {"echo", "raw"}, 0}.encode());
+        WAIT(p.got(MsgType::TextReply), 5000);
+        CHECK(!p.got(MsgType::StreamConfig));
+        CHECK(!p.got(MsgType::Video));
+        CHECK(!p.got(MsgType::Cursor));
+        {
+            std::lock_guard<std::mutex> lk(p.m);
+            for (auto& [t, body] : p.msgs) {
+                if (MsgType(t) != MsgType::TextReply) continue;
+                TextReplyMsg r;
+                CHECK(r.decode(body));
+                CHECK_EQ(r.id, uint64_t(9));
+                CHECK_EQ(r.payload, std::string("raw [text-only]"));
+            }
+        }
+        // An empty command, and a malformed request (out_arg past argv).
+        p.s->write(TextRequestMsg{10, {}, 0}.encode());
+        wire::Writer w;
+        w.varint(11);
+        w.strings({"echo"});
+        w.varint(5);
+        p.s->write(wire::make_message(uint16_t(MsgType::TextRequest), w.data()));
+        WAIT(p.closed(), 5000);
+        CHECK(p.error() == ErrorCode::BadMessage);
+        watcher.close();
+    }
+    {
+        // TextRequest belongs on the text lane, not the input lane.
+        RawPeer control(dial(name));
+        control.s->write(HelloMsg{}.encode());
+        WAIT(control.got(MsgType::Welcome), 5000);
+        WelcomeMsg w;
+        {
+            std::lock_guard<std::mutex> lk(control.m);
+            for (auto& [t, body] : control.msgs) {
+                if (MsgType(t) == MsgType::Welcome) CHECK(w.decode(body));
+            }
+        }
+        if (!w.grant) return;
+        RawPeer input(dial(name));
+        input.s->write(JoinMsg{{w.grant->session, w.grant->token, std::string(kInputLane)}}.encode());
+        WAIT(input.got(MsgType::Joined), 5000);
+        input.s->write(TextRequestMsg{1, {"echo"}, 0}.encode());
+        WAIT(input.error() == ErrorCode::UnknownMessage, 5000);
+        CHECK(!input.got(MsgType::TextReply));
+        // Input does not go on the text lane.
+        RawPeer text(dial(name));
+        text.s->write(JoinMsg{{w.grant->session, w.grant->token, std::string(kTextLane)}}.encode());
+        WAIT(text.got(MsgType::Joined), 5000);
+        text.s->write(InputMsg{InputEvent::key(7, true)}.encode());
+        WAIT(text.error() == ErrorCode::UnknownMessage, 5000);
+        std::vector<InputEvent> got;
+        server->drain_input(got);
+        CHECK(got.empty());
+    }
+
+    check::phase("text: no handler, and replies after the server");
+    {
+        std::function<void(bool, std::string, std::string)> kept;
+        std::mutex km;
+        server->set_text_handler([&](TextRequest r) {
+            std::lock_guard<std::mutex> lk(km);
+            kept = std::move(r.reply);
+        });
+        std::string err;
+        auto t = TextClient::open(dial(name), {}, &err);
+        CHECK(t != nullptr);
+        if (!t) return;
+        std::atomic<bool> done{false};
+        TextReply last;
+        t->request({"anything"}, 0, [&](TextReply x) {
+            last = std::move(x);
+            done = true;
+        });
+        CHECK(check::wait_for([&] {
+            std::lock_guard<std::mutex> lk(km);
+            return bool(kept);
+        }));
+        server->set_text_handler({});
+        CHECK(!t->request_sync({"echo"}).ok);
+        CHECK_EQ(t->request_sync({"echo"}).payload, std::string("this host serves no text requests"));
+        server.reset();
+        CHECK(check::wait_for([&] { return done.load(); }));
+        CHECK(!last.ok);  // the connection closed before a reply
+        kept(true, "too late", {});  // dropped, safely
+    }
+    std::lock_guard<std::mutex> lk(workers_m);
+    for (auto& w : workers) w.join();
+}
+
 void test_client_side() {
     check::phase("client: connect failures");
     std::string err;
@@ -823,6 +1068,7 @@ int main() {
     test_protocol_errors();
     test_timing();
     test_lanes();
+    test_text();
     test_client_side();
     return check::finish();
 }

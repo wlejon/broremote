@@ -8,6 +8,7 @@ namespace broremote {
 
 std::unique_ptr<Server> Server::create(const ServerConfig& cfg, std::string* err) {
     auto impl = std::make_unique<Impl>();
+    impl->text_hub->impl = impl.get();
     impl->cfg = cfg;
     if (impl->cfg.max_frames_in_flight == 0) impl->cfg.max_frames_in_flight = 1;
     if (impl->cfg.fps == 0) impl->cfg.fps = 60;
@@ -51,6 +52,13 @@ Server::Server(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 Server::~Server() {
     Impl& s = *impl_;
+    // Text replies still to come (from the host's threads) are dropped from
+    // here on, and the handler is never called again.
+    {
+        std::lock_guard<std::mutex> lk(s.text_hub->mu);
+        s.text_hub->impl = nullptr;
+    }
+    set_text_handler({});
     {
         std::lock_guard<std::mutex> lk(s.m);
         s.stop = true;
@@ -125,7 +133,19 @@ void Server::set_cursor(const CursorState& cursor) {
     s.waker.wake();
 }
 
+void Server::set_text_handler(std::function<void(TextRequest)> handler) {
+    std::function<void(TextRequest)> old;
+    {
+        std::lock_guard<std::mutex> lk(impl_->text_m);
+        old.swap(impl_->text_handler);
+        impl_->text_handler = std::move(handler);
+    }
+    // `old` (and whatever it holds) goes here, outside text_m.
+}
+
 size_t Server::client_count() const { return impl_->attached.load(); }
+
+size_t Server::text_session_count() const { return impl_->text_sessions.load(); }
 
 bool Server::wants_frames() const { return impl_->attached.load() > 0; }
 
@@ -157,7 +177,7 @@ Server::Stats Server::stats() const {
 
 bool Server::Impl::paused() const {
     for (const auto& c : clients) {
-        if (c->attached && !c->closing && !c->dead && c->unacked.size() >= cfg.max_frames_in_flight) return true;
+        if (c->watching() && c->unacked.size() >= cfg.max_frames_in_flight) return true;
     }
     return false;
 }
@@ -171,7 +191,7 @@ void Server::Impl::queue(ClientConn& c, SharedMessage msg) {
 
 void Server::Impl::queue_attached(const SharedMessage& msg) {
     for (auto& c : clients) {
-        if (c->attached) queue(*c, msg);
+        if (c->watching()) queue(*c, msg);
     }
 }
 

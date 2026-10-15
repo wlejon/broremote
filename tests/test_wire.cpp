@@ -191,7 +191,21 @@ void test_messages() {
         CHECK_EQ(b.major, kProtocolMajor);
         CHECK_EQ(b.minor, uint16_t(3));
         CHECK_EQ(b.name, std::string("viewer"));
-        check_truncations<HelloMsg>(a.encode());
+        CHECK_EQ(b.flags, uint64_t(0));
+        // 1.6's flags are optional at the end (a 1.5 Hello has none): every
+        // truncation of the body before them fails.
+        const std::string body15(m.payload.substr(0, m.payload.size() - 1));
+        check_truncations<HelloMsg>(wire::make_message(uint16_t(MsgType::Hello), body15));
+        CHECK(b.decode(body15));
+        CHECK_EQ(b.flags, uint64_t(0));
+        {
+            HelloMsg f;
+            f.flags = kHelloNoVideo | 0x100;  // a bit this version does not know rides along
+            auto fm = unframe(f.encode(), st);
+            HelloMsg g;
+            CHECK(g.decode(fm.payload));
+            CHECK_EQ(g.flags, kHelloNoVideo | 0x100);
+        }
         // Wrong magic.
         std::string bad(m.payload);
         bad[0] = 'X';
@@ -203,6 +217,51 @@ void test_messages() {
         big.name = std::string(kMaxNameBytes + 1, 'n');
         auto bm = unframe(big.encode(), st);
         CHECK(!b.decode(bm.payload));
+    }
+    {
+        // 1.6 text: requests and replies, with and without their optional last field.
+        TextRequestMsg a;
+        a.id = 300;
+        a.argv = {"shot", "w3", "out.png", ""};
+        a.out_arg = 2;
+        auto m = unframe(a.encode(), st);
+        CHECK_EQ(m.type, uint16_t(MsgType::TextRequest));
+        TextRequestMsg b;
+        CHECK(b.decode(m.payload));
+        CHECK_EQ(b.id, uint64_t(300));
+        CHECK(b.argv == a.argv);
+        CHECK_EQ(b.out_arg, uint64_t(2));
+        TextRequestMsg plain;
+        plain.id = 1;
+        plain.argv = {"view"};
+        auto pm = unframe(plain.encode(), st);
+        check_truncations<TextRequestMsg>(plain.encode());
+        CHECK(b.decode(pm.payload));
+        CHECK_EQ(b.out_arg, uint64_t(0));
+        // out_arg must name an argument after the command.
+        TextRequestMsg past = a;
+        past.out_arg = 4;
+        CHECK(!b.decode(unframe(past.encode(), st).payload));
+        // A count the bytes could not hold.
+        wire::Writer w;
+        w.varint(1);
+        w.varint(1000000);
+        CHECK(!b.decode(w.data()));
+
+        TextReplyMsg r{300, true, "{\"path\":\"x\"}", std::string("\x89PNG\0\1", 6)};
+        auto rm = unframe(r.encode(), st);
+        CHECK_EQ(rm.type, uint16_t(MsgType::TextReply));
+        TextReplyMsg r2;
+        CHECK(r2.decode(rm.payload));
+        CHECK_EQ(r2.id, uint64_t(300));
+        CHECK(r2.ok);
+        CHECK_EQ(r2.payload, r.payload);
+        CHECK_EQ(r2.file, r.file);
+        TextReplyMsg nofile{2, false, "no command 'x'", {}};
+        check_truncations<TextReplyMsg>(nofile.encode());
+        CHECK(r2.decode(unframe(nofile.encode(), st).payload));
+        CHECK(!r2.ok);
+        CHECK(r2.file.empty());
     }
     {
         WelcomeMsg a{1, 2, "srv"};

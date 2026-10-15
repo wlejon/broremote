@@ -40,11 +40,18 @@ inline constexpr uint16_t kProtocolMajor = 1;
 // RelativeMotion kind for a host whose pointer is locked.
 // 1.5 added the host's audio status at the end of AudioStats (why there is
 // no audio right now, e.g. the PipeWire daemon restarting).
-inline constexpr uint16_t kProtocolMinor = 5;
+// 1.6 added text: Hello ends with flags (NoVideo: a session that carries
+// only text, which the encoder never runs for), and the `text` lane carries
+// TextRequest / TextReply, the host's control commands and their answers.
+inline constexpr uint16_t kProtocolMinor = 6;
 
 // The lanes a server accepts (Join's lane name).
 inline constexpr std::string_view kInputLane = "input";
 inline constexpr std::string_view kAudioLane = "audio";  // 1.3
+inline constexpr std::string_view kTextLane = "text";    // 1.6
+
+// Hello's flags (1.6).
+inline constexpr uint64_t kHelloNoVideo = 1;  // send this session no video or cursor; it is not a viewer
 
 // Limits a decoder enforces on what a peer sends.
 inline constexpr size_t kMaxNameBytes = 256;        // Hello / Welcome names
@@ -53,6 +60,7 @@ inline constexpr size_t kMaxShapeBytes = 64;        // Cursor shape name
 inline constexpr size_t kMaxCodecList = 16;         // SetCodec entries
 inline constexpr uint32_t kMaxDimension = 16384;    // StreamConfig width / height
 inline constexpr size_t kMaxAudioBytes = 1u << 20;  // AudioData pcm (far beyond any sane packet)
+inline constexpr size_t kMaxTextArgs = 4096;        // TextRequest argv entries
 
 enum class MsgType : uint16_t {
     // client -> server
@@ -66,6 +74,7 @@ enum class MsgType : uint16_t {
     AudioStart = 0x0108,    // 1.3, audio lane: what the viewer sends and wants
     AudioUp = 0x0109,       // 1.3, audio lane: the viewer's mic (AudioDataMsg)
     AudioControl = 0x010A,  // 1.3, audio lane: mute toggles
+    TextRequest = 0x010B,   // 1.6, text lane (or a NoVideo session's control connection): a command line
     // server -> client
     Welcome = 0x0201,
     StreamConfig = 0x0202,
@@ -78,6 +87,7 @@ enum class MsgType : uint16_t {
     AudioStarted = 0x0209,  // 1.3, audio lane: the answer to AudioStart
     AudioDown = 0x020A,     // 1.3, audio lane: the host's audio (AudioDataMsg)
     AudioStats = 0x020B,    // 1.3, audio lane: the host's view of the mic path
+    TextReply = 0x020C,     // 1.6: the answer to a TextRequest
 };
 
 enum class ErrorCode : uint16_t {
@@ -100,6 +110,7 @@ struct HelloMsg {
     uint16_t major = kProtocolMajor;
     uint16_t minor = kProtocolMinor;
     std::string name;
+    uint64_t flags = 0;  // 1.6: kHelloNoVideo; bits this version does not know are ignored
     [[nodiscard]] std::string encode() const;
     bool decode(std::string_view payload);  // false also on a wrong magic
 };
@@ -150,7 +161,34 @@ struct JoinMsg {
     bool decode(std::string_view payload);
 };
 
+// 1.6. A command line for the host, answered by a TextReply with the same id
+// (replies come back in the order the commands finish, so several can be in
+// flight). The bodies are bro's agent control Request / Reply
+// (bro: src/platform/control_protocol.h): the text lane carries exactly
+// those commands and replies, and broremote only relays them.
+struct TextRequestMsg {
+    uint64_t id = 0;
+    std::vector<std::string> argv;  // argv[0] is the command (at most kMaxTextArgs entries)
+    // 0: none. Else the index (>= 1) of an argument that names an output file:
+    // the host replaces it with a private file of its own (keeping its
+    // extension), and the file's bytes come back in the reply, so a command
+    // that writes a file (a screenshot) works where the host's disk is not
+    // the client's.
+    uint64_t out_arg = 0;
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
+
 // ---- server -> client ---------------------------------------------------------------
+
+struct TextReplyMsg {
+    uint64_t id = 0;     // the TextRequest's
+    bool ok = false;     // false: payload says why the command failed
+    std::string payload; // text or JSON, the command's choice
+    std::string file;    // the out_arg file's bytes (empty when none)
+    [[nodiscard]] std::string encode() const;
+    bool decode(std::string_view payload);
+};
 
 // 1.2: the answer to a Join that succeeded. Empty body.
 struct JoinedMsg {

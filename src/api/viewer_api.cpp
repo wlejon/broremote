@@ -16,7 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -49,6 +51,77 @@ struct Entry {
 
 std::vector<std::unique_ptr<Entry>> g_sessions;
 uint32_t g_nextId = 1;
+
+// session.request(): each pending promise, by key (host thread), and the
+// replies the session threads have delivered for them (under g_repliesM),
+// settled by the next tick.
+std::map<uint64_t, std::unique_ptr<ev::Persistent>> g_requests;
+uint64_t g_nextRequest = 1;
+std::mutex g_repliesM;
+std::vector<std::pair<uint64_t, TextReply>> g_replies;
+
+// A command line as one string: words split on blanks, '...' and "..."
+// quoting, backslash escapes (bro-ctl batch's rules).
+std::vector<std::string> splitCommand(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    bool have = false;
+    char q = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (q) {
+            if (c == q) q = 0;
+            else if (c == '\\' && q == '"' && i + 1 < line.size()) cur += line[++i];
+            else cur += c;
+        } else if (c == '\'' || c == '"') {
+            q = c;
+            have = true;
+        } else if (c == '\\' && i + 1 < line.size()) {
+            cur += line[++i];
+            have = true;
+        } else if (c == ' ' || c == '\t' || c == '\n') {
+            if (have) out.push_back(cur);
+            cur.clear();
+            have = false;
+        } else {
+            cur += c;
+            have = true;
+        }
+    }
+    if (have) out.push_back(cur);
+    return out;
+}
+
+Value replyObject(const TextReply& r) {
+    ObjectBuilder o;
+    o.set("ok", r.ok);
+    o.set("text", r.payload);
+    if (r.file.empty()) {
+        o.set("file", ev::null());
+    } else {
+        ev::Persistent bytes(ev::createTypedArray(ev::elements::Uint8, static_cast<uint32_t>(r.file.size())));
+        ev::fillTypedArray(bytes.get(), std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(r.file.data()),
+                                                                 r.file.size()));
+        o.set("file", bytes.get());
+    }
+    return o.get();
+}
+
+void settleRequests() {
+    std::vector<std::pair<uint64_t, TextReply>> done;
+    {
+        std::lock_guard<std::mutex> lk(g_repliesM);
+        done.swap(g_replies);
+    }
+    for (auto& [key, reply] : done) {
+        auto it = g_requests.find(key);
+        if (it == g_requests.end()) continue;  // its realm went away
+        std::unique_ptr<ev::Persistent> promise = std::move(it->second);
+        g_requests.erase(it);
+        ev::Persistent value(replyObject(reply));
+        ev::resolvePromise(promise->get(), value.get());
+    }
+}
 
 Entry* entryById(uint32_t id) {
     for (auto& e : g_sessions) {
@@ -417,6 +490,53 @@ void defineConnect(ObjectBuilder& remote) {
             if (Entry* e = entryById(id)) e->session->set_playback_muted(ev::toBool(a[0]));
             return ev::undefined();
         });
+        // request(command, {outArg}) -> Promise<{ok, text, file}>: a command
+        // line for the host over the session's text lane (protocol 1.6).
+        obj.def("request", 2, [id](Value, std::span<const Value> a) -> Value {
+            const char* usage = "session.request(command, {outArg}): command is a string or an array of strings";
+            std::vector<std::string> argv;
+            ev::Persistent cmd(a.empty() ? ev::undefined() : a[0]);
+            if (ev::isString(cmd.get())) {
+                argv = splitCommand(ev::toUtf8(cmd.get()));
+            } else if (ev::isObject(cmd.get())) {
+                Value lenV = ev::getProperty(cmd.get(), "length");
+                if (!ev::isNumber(lenV)) return ev::throwTypeError(usage);
+                const double len = ev::toDouble(lenV);
+                if (!(len >= 0.0 && len <= double(kMaxTextArgs))) return ev::throwTypeError(usage);
+                for (uint32_t i = 0; i < static_cast<uint32_t>(len); ++i) {
+                    Value e = ev::getElement(cmd.get(), i);
+                    if (!ev::isString(e)) return ev::throwTypeError(usage);
+                    argv.push_back(ev::toUtf8(e));
+                }
+            } else {
+                return ev::throwTypeError(usage);
+            }
+            if (argv.empty()) return ev::throwTypeError("session.request: an empty command");
+            size_t outArg = 0;
+            if (a.size() > 1 && ev::isObject(a[1])) {
+                Value o = ev::getProperty(a[1], "outArg");
+                if (ev::isNumber(o)) {
+                    const double d = ev::toDouble(o);
+                    if (!(d >= 1.0 && d < double(argv.size())) || d != std::floor(d)) {
+                        return ev::throwTypeError("session.request: outArg is the index (>= 1) of an argument");
+                    }
+                    outArg = static_cast<size_t>(d);
+                }
+            }
+            ev::Persistent promise(ev::createPromise());
+            const uint64_t key = g_nextRequest++;
+            g_requests.emplace(key, std::make_unique<ev::Persistent>(promise.get()));
+            auto done = [key](TextReply r) {
+                {
+                    std::lock_guard<std::mutex> lk(g_repliesM);
+                    g_replies.emplace_back(key, std::move(r));
+                }
+                if (g_viewerHooks.wake) g_viewerHooks.wake();
+            };
+            if (Entry* e = entryById(id)) e->session->request(std::move(argv), outArg, std::move(done));
+            else done(TextReply{false, "the session is closed", {}});
+            return promise.get();
+        });
         obj.def("close", 0, [id](Value, std::span<const Value>) -> Value {
             const bool was = entryById(id) != nullptr;
             destroyEntry(id);
@@ -460,6 +580,7 @@ void defineConnect(ObjectBuilder& remote) {
 }
 
 void tickViewers() {
+    if (!g_requests.empty()) settleRequests();
     // A listener may close sessions (any of them): walk by id.
     std::vector<uint32_t> ids;
     for (auto& e : g_sessions) ids.push_back(e->id);
@@ -498,6 +619,10 @@ void tickViewers() {
 
 void closeAllViewers() {
     while (!g_sessions.empty()) destroyEntry(g_sessions.back()->id);
+    // The realm the promises belong to is going: they are never settled.
+    g_requests.clear();
+    std::lock_guard<std::mutex> lk(g_repliesM);
+    g_replies.clear();
 }
 
 }  // namespace broremote::api

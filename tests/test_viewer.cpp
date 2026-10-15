@@ -247,6 +247,34 @@ int main() {
         CHECK_EQ(st.config.width, 800u);
         CHECK_EQ(st.config.height, 600u);
 
+        check::phase("the text lane: requests on a lane of the session");
+        server->set_text_handler([](TextRequest r) {
+            std::string s = r.text_only ? "agent:" : "viewer:";
+            for (const auto& a : r.argv) s += " " + a;
+            r.reply(true, s, r.out_arg ? "bytes of " + r.argv[r.out_arg] : std::string());
+        });
+        {
+            std::mutex m;
+            std::condition_variable cv;
+            std::vector<TextReply> replies;
+            auto collect_reply = [&](TextReply r) {
+                std::lock_guard<std::mutex> lk(m);
+                replies.push_back(std::move(r));
+                cv.notify_all();
+            };
+            // The first opens the lane; the others queue behind it.
+            session.request({"view"}, 0, collect_reply);
+            session.request({"shot", "w1", "x.png"}, 2, collect_reply);
+            std::unique_lock<std::mutex> lk(m);
+            CHECK(cv.wait_for(lk, std::chrono::seconds(10), [&] { return replies.size() == 2; }));
+            if (replies.size() == 2) {
+                CHECK(replies[0].ok && replies[0].payload == "viewer: view");
+                CHECK(replies[1].ok && replies[1].payload == "viewer: shot w1 x.png");
+                CHECK_EQ(replies[1].file, std::string("bytes of x.png"));
+            }
+            CHECK_EQ(server->client_count(), size_t(1));  // a lane, not another viewer
+        }
+
         check::phase("closing from this side");
         session.close();
         WAIT(session.status().state == ViewerState::Closed, 5000);

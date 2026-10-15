@@ -46,6 +46,8 @@ struct ClientConn {
     bool handed = false;            // out.front() is with the loop
     size_t out_bytes = 0;           // bytes queued in `out` (including the handed front)
     bool attached = false;          // Hello answered with Welcome
+    bool text_only = false;         // 1.6: Hello said NoVideo: no video, cursor or codec say; not a viewer
+    size_t text_pending = 0;        // TextRequests handed to the host and not yet answered
     bool lane = false;              // Join answered with Joined: this is a lane of another client
     std::string lane_name;
     bool synced = false;            // sent a keyframe of the current stream
@@ -67,7 +69,22 @@ struct ClientConn {
     };
     std::deque<SentMark> marks;
     Clock::time_point front_started{};  // when out.front() was handed to the loop
+
+    // A viewer: attached, taking video, and not on its way out.
+    [[nodiscard]] bool watching() const { return attached && !text_only && !closing && !dead; }
 };
+
+// How a text reply finds its way back from whatever thread the host answers
+// on, even after the Server has gone: replies hold the hub, and the Server
+// empties it (under `mu`) before it is destroyed.
+struct TextHub {
+    std::mutex mu;
+    Server::Impl* impl = nullptr;
+};
+
+// At most this many requests of one connection wait for the host at once;
+// beyond it a request is answered at once with an error.
+inline constexpr size_t kMaxTextPending = 256;
 
 // One viewer's audio lane (server_audio.cpp). The rings come before the
 // endpoints, so the endpoints (whose realtime callbacks use the rings) are
@@ -165,6 +182,20 @@ struct Server::Impl final : brolink::LoopHandler {
     std::condition_variable audio_cv;
     std::atomic<bool> audio_pending{false};  // a monitor delivered frames (set from realtime threads)
     std::atomic<bool> audio_stop{false};
+
+    // The text lane (1.6). Requests decoded under `m` wait in text_out and
+    // go to the handler once `m` is released; text_m is held while the
+    // handler runs, so set_text_handler can tell when it has stopped.
+    std::shared_ptr<TextHub> text_hub = std::make_shared<TextHub>();
+    std::vector<TextRequest> text_out;  // under `m`
+    std::mutex text_m;
+    std::function<void(TextRequest)> text_handler;  // under text_m
+    std::atomic<size_t> text_sessions{0};
+
+    void handle_text_request(ClientConn& c, std::string_view payload);  // I/O thread, `m` held
+    void dispatch_text();                                               // I/O thread, `m` not held
+    // Any thread, `m` not held: queue a reply on connection `conn` if it is still there.
+    void deliver_text_reply(brolink::ConnId conn, TextReplyMsg reply);
 
     // ---- server_io.cpp (I/O thread; `m` held unless noted) ----
     void io_loop();                                  // takes `m` itself

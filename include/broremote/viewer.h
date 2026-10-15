@@ -16,6 +16,7 @@
 #include "broremote/client.h"
 #include "broremote/connect.h"
 #include "broremote/latency.h"
+#include "broremote/text_client.h"
 
 #include <atomic>
 #include <chrono>
@@ -147,6 +148,14 @@ public:
     // nothing was recorded.
     void recorded_audio(std::vector<float>& frames, uint32_t& rate, uint32_t& channels) const;
 
+    // The text lane (1.6): a command line for the host (bro: an agent
+    // control command), answered through `done`, once, from a session
+    // thread (or at once when it cannot be sent). The first request opens
+    // the lane, a further connection opened like the control connection that
+    // joins this session; it then stays up with the session. A lane joins a
+    // session once: if it drops, later requests fail.
+    void request(std::vector<std::string> argv, size_t out_arg, TextClient::Callback done);
+
 private:
     struct Item {
         bool is_config = false;
@@ -166,6 +175,7 @@ private:
     void decode_thread();
     void ping_thread();
     void audio_thread(ViewerOptions options, brolink::lanes::Grant grant);
+    void text_thread(brolink::lanes::Grant grant);
     void decode_one(Item& item, Client& client);
     void on_closed(const std::string& why);
     void set_status(const std::function<void(ViewerStatus&)>& f);
@@ -193,6 +203,21 @@ private:
     std::shared_ptr<Stream> audio_stream_;   // to abandon the audio lane's connect
     std::unique_ptr<AudioSession> audio_;
     bool want_mic_muted_ = false, want_playback_muted_ = false;  // before the lane is up
+
+    // The text lane: none until the first request, then opening (requests
+    // wait in text_queue_), up, or failed (text_error_ says why).
+    enum class TextLane { None, Opening, Up, Failed };
+    struct QueuedRequest {
+        std::vector<std::string> argv;
+        size_t out_arg = 0;
+        TextClient::Callback done;
+    };
+    std::thread text_thread_;
+    TextLane text_lane_ = TextLane::None;
+    std::string text_error_;
+    std::shared_ptr<Stream> text_stream_;  // to abandon the lane's connect
+    std::shared_ptr<TextClient> text_;
+    std::vector<QueuedRequest> text_queue_;
 
     // The audio thread's sources.
     std::unique_ptr<Recording> recording_;

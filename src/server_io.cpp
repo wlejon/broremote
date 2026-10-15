@@ -49,20 +49,30 @@ void Server::Impl::on_accept(brolink::ConnId id) {
 }
 
 void Server::Impl::on_data(brolink::ConnId id, const char* data, size_t n) {
-    std::lock_guard<std::mutex> lk(m);
-    ClientConn* c = find(id);
-    if (stop || !c || c->dead || c->closing) return;
-    c->in.feed(data, n);
-    wire::MessageSplitter::Message msg;
-    while (!c->dead && !c->closing && c->in.next(msg)) handle_message(*c, msg.type, msg.payload);
-    if (c->in.error()) close_client(*c, ErrorCode::BadMessage, "framing error");
+    {
+        std::lock_guard<std::mutex> lk(m);
+        ClientConn* c = find(id);
+        if (stop || !c || c->dead || c->closing) return;
+        c->in.feed(data, n);
+        wire::MessageSplitter::Message msg;
+        while (!c->dead && !c->closing && c->in.next(msg)) handle_message(*c, msg.type, msg.payload);
+        if (c->in.error()) close_client(*c, ErrorCode::BadMessage, "framing error");
+        if (text_out.empty()) return;
+    }
+    dispatch_text();
+}
+
+// A session leaving or closing stops counting as what it was.
+static void uncount(Server::Impl& s, const ClientConn& c) {
+    if (c.text_only) s.text_sessions.fetch_sub(1);
+    else s.attached.fetch_sub(1);
 }
 
 void Server::Impl::on_closed(brolink::ConnId id) {
     std::lock_guard<std::mutex> lk(m);
     auto it = std::find_if(clients.begin(), clients.end(), [id](const auto& c) { return c->id == id; });
     if (it == clients.end()) return;
-    if ((*it)->attached && !(*it)->closing) attached.fetch_sub(1);
+    if ((*it)->attached && !(*it)->closing) uncount(*this, **it);
     clients.erase(it);
     drop_audio_peer(id);  // an audio lane's devices go with it
     // A client's session ends with its control connection: its lanes go too.
@@ -131,7 +141,7 @@ void Server::Impl::close_client(ClientConn& c, ErrorCode code, const std::string
     drop_unsent(c);
     c.out.push_back(shared(ErrorMsg{code, message}.encode()));
     c.out_bytes += c.out.back()->size();
-    if (c.attached) attached.fetch_sub(1);
+    if (c.attached) uncount(*this, c);
     c.closing = true;
     c.close_deadline = Clock::now() + kCloseGrace;
     c.unacked.clear();
@@ -171,6 +181,7 @@ void Server::Impl::shutdown_clients() {
     clients.clear();
     audio_peers.clear();
     attached.store(0);
+    text_sessions.store(0);
     loop->close_listener();
 }
 
@@ -190,6 +201,9 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
         case MsgType::Join:
             close_client(c, ErrorCode::BadMessage, "Join on a connection that sent Hello");
             return;
+        case MsgType::TextRequest:
+            handle_text_request(c, payload);
+            return;
         case MsgType::Ack: {
             AckMsg a;
             if (!a.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Ack");
@@ -199,6 +213,7 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
             return;
         }
         case MsgType::RequestKeyframe: {
+            if (c.text_only) return;  // it has no stream to resync
             keyframe_requested = true;
             encode_cv.notify_all();
             return;
@@ -218,13 +233,20 @@ void Server::Impl::handle_message(ClientConn& c, uint16_t type, std::string_view
     }
 }
 
-// An input lane carries Input, and Ping to time it; the rest is the control
-// connection's. An audio lane is server_audio.cpp's.
+// An input lane carries Input, and Ping to time it; a text lane TextRequest
+// and Ping; the rest is the control connection's. An audio lane is
+// server_audio.cpp's.
 void Server::Impl::handle_lane_message(ClientConn& c, uint16_t type, std::string_view payload) {
     if (c.lane_name == kAudioLane) return handle_audio_message(c, type, payload);
+    const bool text = c.lane_name == kTextLane;
     switch (MsgType(type)) {
         case MsgType::Input:
+            if (text) break;
             handle_input(c, payload);
+            return;
+        case MsgType::TextRequest:
+            if (!text) break;
+            handle_text_request(c, payload);
             return;
         case MsgType::Ping:
             handle_ping(c, payload);
@@ -234,12 +256,74 @@ void Server::Impl::handle_lane_message(ClientConn& c, uint16_t type, std::string
             close_client(c, ErrorCode::BadMessage, "Hello or Join on a lane");
             return;
         default:
-            queue(c, shared(ErrorMsg{ErrorCode::UnknownMessage,
-                                     "message type " + std::to_string(type) + " does not go on the " + c.lane_name +
-                                         " lane"}
-                                .encode()));
-            return;
+            break;
     }
+    queue(c, shared(ErrorMsg{ErrorCode::UnknownMessage,
+                             "message type " + std::to_string(type) + " does not go on the " + c.lane_name + " lane"}
+                        .encode()));
+}
+
+// A command line for the host. It waits in text_out until `m` is released,
+// then goes to the handler (dispatch_text); the reply comes back through
+// deliver_text_reply from whatever thread the host answers on.
+void Server::Impl::handle_text_request(ClientConn& c, std::string_view payload) {
+    TextRequestMsg req;
+    if (!req.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed TextRequest");
+    ++stats.text_requests;
+    auto refuse = [&](const std::string& why) {
+        ++stats.text_replies;
+        queue(c, shared(TextReplyMsg{req.id, false, why, {}}.encode()));
+    };
+    if (req.argv.empty()) return refuse("empty command");
+    if (c.text_pending >= kMaxTextPending) {
+        return refuse("too many requests in flight (" + std::to_string(kMaxTextPending) + ")");
+    }
+    // The session's name and kind: the control connection's, for a lane.
+    const ClientConn* session = &c;
+    if (c.lane) {
+        if (const auto* member = lanes.member(c.id)) {
+            if (auto owner = lanes.control(member->session)) {
+                if (const ClientConn* s = find(*owner)) session = s;
+            }
+        }
+    }
+    ++c.text_pending;
+    TextRequest out;
+    out.argv = std::move(req.argv);
+    out.out_arg = size_t(req.out_arg);
+    out.client = session->name;
+    out.text_only = session->text_only;
+    out.reply = [hub = text_hub, conn = c.id, id = req.id](bool ok, std::string text, std::string file) {
+        std::lock_guard<std::mutex> lk(hub->mu);
+        if (hub->impl) hub->impl->deliver_text_reply(conn, TextReplyMsg{id, ok, std::move(text), std::move(file)});
+    };
+    text_out.push_back(std::move(out));
+}
+
+void Server::Impl::dispatch_text() {
+    std::vector<TextRequest> work;
+    {
+        std::lock_guard<std::mutex> lk(m);
+        work.swap(text_out);
+    }
+    std::lock_guard<std::mutex> tk(text_m);
+    for (TextRequest& r : work) {
+        if (text_handler) text_handler(std::move(r));
+        else r.reply(false, "this host serves no text requests", {});
+    }
+}
+
+void Server::Impl::deliver_text_reply(brolink::ConnId conn, TextReplyMsg reply) {
+    SharedMessage msg = shared(reply.encode());
+    {
+        std::lock_guard<std::mutex> lk(m);
+        ClientConn* c = find(conn);
+        if (!c || c->closed) return;
+        if (c->text_pending) --c->text_pending;
+        ++stats.text_replies;
+        queue(*c, std::move(msg));
+    }
+    waker.wake();
 }
 
 void Server::Impl::handle_input(ClientConn& c, std::string_view payload) {
@@ -276,13 +360,22 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
     c.name = h.name;
     c.minor = h.minor;
     c.attached = true;
-    attached.fetch_add(1);
     WelcomeMsg w;
     w.name = cfg.name;
     // The client's session: further connections join it as lanes with this
     // grant. Without one (the OS refused random bytes) the client simply
     // has no lanes and sends everything on this connection.
     if (auto grant = lanes.open(c.id)) w.grant = *grant;
+    // 1.6: a text-only session (an agent) is sent no video and no cursor,
+    // and changes nothing about the stream: it is not a viewer, so it does
+    // not start the encoder. Its text goes on this connection.
+    c.text_only = (h.flags & kHelloNoVideo) != 0;
+    if (c.text_only) {
+        text_sessions.fetch_add(1);
+        queue(c, shared(w.encode()));
+        return;
+    }
+    attached.fetch_add(1);
     queue(c, shared(w.encode()));
     if (stream) queue(c, shared(stream->encode()));
     if (cursor_set) queue(c, shared(CursorMsg{cursor}.encode()));
@@ -294,7 +387,7 @@ void Server::Impl::handle_hello(ClientConn& c, std::string_view payload) {
 void Server::Impl::handle_join(ClientConn& c, std::string_view payload) {
     JoinMsg j;
     if (!j.decode(payload)) return close_client(c, ErrorCode::BadMessage, "malformed Join");
-    if (j.join.lane != kInputLane && j.join.lane != kAudioLane) {
+    if (j.join.lane != kInputLane && j.join.lane != kAudioLane && j.join.lane != kTextLane) {
         return close_client(c, ErrorCode::JoinRefused, "there is no '" + j.join.lane + "' lane here");
     }
     const brolink::lanes::JoinResult r = lanes.join(c.id, j.join);
@@ -326,7 +419,7 @@ bool Server::Impl::choose_codec() {
     for (Codec cand : server_codecs) {
         bool all = true;
         for (const auto& c : clients) {
-            if (!c->attached || c->closing || c->dead || c->codecs.empty()) continue;
+            if (!c->watching() || c->codecs.empty()) continue;
             if (std::find(c->codecs.begin(), c->codecs.end(), cand) == c->codecs.end()) all = false;
         }
         if (all) {
@@ -336,7 +429,7 @@ bool Server::Impl::choose_codec() {
     }
     uint32_t kbps = cfg.bitrate_kbps;
     for (const auto& c : clients) {
-        if (c->attached && !c->closing && !c->dead && c->max_kbps) kbps = std::min(kbps, c->max_kbps);
+        if (c->watching() && c->max_kbps) kbps = std::min(kbps, c->max_kbps);
     }
     want_kbps = kbps;
     if (!pick) return false;

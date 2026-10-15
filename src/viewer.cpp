@@ -33,19 +33,33 @@ std::string codec_list(const std::vector<Codec>& v) {
 ViewerSession::ViewerSession(std::function<void()> wake) : wake_(std::move(wake)) {}
 
 ViewerSession::~ViewerSession() {
-    std::shared_ptr<Stream> stream, audio_stream;
+    std::shared_ptr<Stream> stream, audio_stream, text_stream;
     {
         std::lock_guard<std::mutex> lk(m_);
         stopping_ = true;
         user_closed_ = true;
         stream = stream_;
         audio_stream = audio_stream_;
+        text_stream = text_stream_;
     }
     cv_.notify_all();
     // Unblocks a connect in progress (ssh still starting, or the handshake)
     // as well as a live connection's reader.
     if (stream) stream->shutdown();
     if (audio_stream) audio_stream->shutdown();
+    if (text_stream) text_stream->shutdown();
+    if (text_thread_.joinable()) text_thread_.join();
+    std::shared_ptr<TextClient> text;
+    std::vector<QueuedRequest> queued;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        text = std::move(text_);
+        queued.swap(text_queue_);
+    }
+    text.reset();  // answers what it still had open
+    for (auto& q : queued) {
+        if (q.done) q.done(TextReply{false, "the session closed", {}});
+    }
     if (connector_.joinable()) connector_.join();
     {
         std::lock_guard<std::mutex> lk(m_);
@@ -352,6 +366,84 @@ void ViewerSession::audio_thread(ViewerOptions options, brolink::lanes::Grant gr
         audio_ = std::move(a);
     }
     if (wake_) wake_();
+}
+
+void ViewerSession::request(std::vector<std::string> argv, size_t out_arg, TextClient::Callback done) {
+    std::shared_ptr<TextClient> text;
+    std::string refuse;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        switch (text_lane_) {
+            case TextLane::Up:
+                text = text_;
+                break;
+            case TextLane::Failed:
+                refuse = text_error_;
+                break;
+            case TextLane::Opening:
+                text_queue_.push_back({std::move(argv), out_arg, std::move(done)});
+                return;
+            case TextLane::None: {
+                const WelcomeMsg* w = live_ ? &live_->welcome() : nullptr;
+                if (stopping_ || !w) {
+                    refuse = "not connected";
+                } else if (!w->grant || w->minor < 6) {
+                    refuse = "the host speaks protocol " + std::to_string(w->major) + "." + std::to_string(w->minor) +
+                             "; the text lane needs 1.6";
+                } else {
+                    text_lane_ = TextLane::Opening;
+                    text_queue_.push_back({std::move(argv), out_arg, std::move(done)});
+                    text_thread_ = std::thread([this, g = *w->grant] { text_thread(g); });
+                    return;
+                }
+                break;
+            }
+        }
+    }
+    if (text) return text->request(std::move(argv), out_arg, std::move(done));
+    if (done) done(TextReply{false, "no text lane: " + refuse, {}});
+}
+
+void ViewerSession::text_thread(brolink::lanes::Grant grant) {
+    std::string err;
+    std::shared_ptr<TextClient> text;
+    if (std::unique_ptr<Stream> opened = open_stream(options_.target, &err)) {
+        std::shared_ptr<Stream> shared(std::move(opened));
+        bool stop = false;
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            stop = stopping_;
+            if (!stop) text_stream_ = shared;
+        }
+        if (stop) {
+            err = "the session closed";
+        } else {
+            TextClientOptions o;
+            o.timeout_ms = options_.target.remote() ? 15000 : 5000;
+            text = TextClient::join(std::make_unique<SharedStream>(shared), grant, o, &err);
+        }
+    } else {
+        err = "cannot open the text lane: " + err;
+    }
+    std::vector<QueuedRequest> queued;
+    {
+        std::lock_guard<std::mutex> lk(m_);
+        queued.swap(text_queue_);
+        if (text && !stopping_) {
+            text_ = text;
+            text_lane_ = TextLane::Up;
+        } else {
+            if (err.empty()) err = "the session closed";
+            text_error_ = err;
+            text_lane_ = TextLane::Failed;
+            text.reset();
+        }
+    }
+    say(text ? "text lane up" : "no text lane: " + err);
+    for (auto& q : queued) {
+        if (text) text->request(std::move(q.argv), q.out_arg, std::move(q.done));
+        else if (q.done) q.done(TextReply{false, "no text lane: " + err, {}});
+    }
 }
 
 bool ViewerSession::audio_stats(AudioSession::Stats& out) const {

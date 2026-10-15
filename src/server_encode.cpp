@@ -41,7 +41,7 @@ void Server::Impl::encode_loop() {
             VideoPacket::encode_message(stream->stream_id, id, pkt.pts_ns, pkt.keyframe, pkt.data, timing));
         const Clock::time_point queued = Clock::now();
         for (auto& c : clients) {
-            if (!c->attached || c->closing || c->dead) continue;
+            if (!c->watching()) continue;
             if (!pkt.keyframe && !c->synced) continue;
             c->synced = true;
             queue(*c, msg);
@@ -61,7 +61,7 @@ void Server::Impl::encode_loop() {
         repeats_left = 0;
         const std::string why = std::string(codec_name(codec)) + " encoder: " + err;
         for (auto& c : clients) {
-            if (c->attached && !c->closing && !c->dead) close_client(*c, ErrorCode::EncoderFailed, why);
+            if (c->watching()) close_client(*c, ErrorCode::EncoderFailed, why);
         }
         waker.wake();
     };

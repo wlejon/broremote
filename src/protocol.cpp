@@ -38,6 +38,7 @@ std::string HelloMsg::encode() const {
     w.u16(major);
     w.u16(minor);
     w.str(name);
+    w.varint(flags);  // 1.6
     return message(MsgType::Hello, w);
 }
 
@@ -48,6 +49,50 @@ bool HelloMsg::decode(std::string_view payload) {
     major = r.u16();
     minor = r.u16();
     name = r.str_max(kMaxNameBytes);
+    flags = 0;
+    if (r.ok() && !r.at_end()) flags = r.varint();  // 1.6
+    return r.ok();
+}
+
+// TextRequest / TextReply: bro's control Request / Reply bodies. The last
+// field of each is optional on the wire (absent: none), so a body without it
+// is also an older bro control message.
+std::string TextRequestMsg::encode() const {
+    wire::Writer w;
+    w.varint(id);
+    w.strings(argv);
+    if (out_arg) w.varint(out_arg);
+    return message(MsgType::TextRequest, w);
+}
+
+bool TextRequestMsg::decode(std::string_view payload) {
+    wire::Reader r(payload);
+    id = r.varint();
+    const size_t n = r.count(1);
+    if (!r.ok() || n > kMaxTextArgs) return false;
+    argv.assign(n, {});
+    for (std::string& a : argv) a = r.str();
+    out_arg = 0;
+    if (r.ok() && !r.at_end()) out_arg = r.varint();
+    return r.ok() && (out_arg == 0 || out_arg < argv.size());
+}
+
+std::string TextReplyMsg::encode() const {
+    wire::Writer w;
+    w.varint(id);
+    w.boolean(ok);
+    w.str(payload);
+    if (!file.empty()) w.str(file);
+    return message(MsgType::TextReply, w);
+}
+
+bool TextReplyMsg::decode(std::string_view body) {
+    wire::Reader r(body);
+    id = r.varint();
+    ok = r.boolean();
+    payload = r.str();
+    file.clear();
+    if (r.ok() && !r.at_end()) file = r.str();
     return r.ok();
 }
 

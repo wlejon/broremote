@@ -45,6 +45,8 @@ include/broremote/
   codec.h       brovideo's Codec, Encoder, Decoder and their configs; codec_known() for the wire
   server.h      Server: the host submits frames and drains input
   client.h      Client: connects, receives packets, sends input
+  text_client.h TextClient: text requests (1.6), in a text-only session of
+                its own or on a session's text lane
   audio.h       PCM formats and conversion, the SPSC ring, the jitter buffer,
                 tone analysis (level, frequency, onset), WAV files
   audio_device.h  the small audio device layer: Backend (capture, playback,
@@ -135,6 +137,34 @@ connection all the way (over ssh, a second ssh). The session ends with the
 control connection; a lane that fails or closes only sends input back to the
 control connection. Never ssh's ControlMaster: multiplexed channels share one
 TCP connection and its head-of-line blocking, which is what lanes avoid.
+
+### Text (1.6)
+
+The host's control commands (bro's agent control: `view`, `windows`,
+`launch`, `shot`, `eval`, ...) and their replies, so an agent operates the
+hosted session through broremote rather than a shell of its own. broremote
+relays them and knows none: the server hands each `TextRequest` to the
+host's handler (`Server::set_text_handler`) and sends whatever the host
+replies, from any thread, as `TextReply`. Request ids let several be in
+flight. The bodies are bro's control protocol's own, so the text is the same
+text a local `bro-ctl` gets.
+
+What a session is did not change; text adds two ways in:
+
+- **A text-only session**: `Hello` with the `NoVideo` flag. It is not a
+  viewer (no video, no cursor, no codec say, not in `client_count()`), so an
+  agent alone runs no encoder, and an agent beside a person's viewer is a
+  second session that changes nothing about the person's.
+- **The `text` lane** of any session (a viewer app's own, `session.request()`
+  in JavaScript), so its text never queues behind its video.
+
+One model covers both cases asked for (an agent with a person watching, an
+agent alone): agents never share a person's session, so neither needs the
+other's grant and either can come and go. The authorization is the session:
+reaching the server at all takes the host user's socket or an ssh login as
+that user. docs/protocol.md has the messages, the `out_arg` file return (a
+screenshot's PNG comes back in the reply) and the planned agent-to-agent
+steps.
 
 ### The audio lane (1.3)
 
@@ -245,6 +275,7 @@ over PipeWire and over WASAPI.
 | `Video` | stream id, frame id (varint), pts ns (svarint), flags (keyframe), bitstream bytes |
 | `Cursor` | visible, x, y in stream pixels, hotspot, shape name (str); image later |
 | `Error` | code, message |
+| `TextReply` | (1.6) request id, ok, payload, optional file bytes |
 
 A `Video` message always belongs to the latest `StreamConfig` the client was
 sent; the first `Video` after a `StreamConfig` is a keyframe. Bitstreams are
@@ -255,7 +286,8 @@ sets in-band on every keyframe, so a decoder needs nothing but the packets.
 
 | Message | Body |
 |---|---|
-| `Hello` | magic, major, minor, client name |
+| `Hello` | magic, major, minor, client name; 1.6: flags (`NoVideo`) |
+| `TextRequest` | (1.6) request id, argv, optional out_arg: on the text lane or a text-only session's control connection |
 | `Ack` | highest frame id the client has finished with: decoded, or abandoned after a decode error |
 | `RequestKeyframe` | (empty) — the decoder lost sync |
 | `Input` | one `InputEvent` (below) |
@@ -394,6 +426,15 @@ transport. Lane connections (above) are clients of the same loop whose
 messages go to the session's input queue; `Stats` counts the lanes joined
 and the inputs that came on them.
 
+Text requests (1.6) are decoded under the server's lock and handed to the
+handler once it is released, on the I/O thread; the handler must not block.
+Each carries a `reply` callable from any thread, even after the session or
+the whole Server has gone (it then drops the reply): replies reach the
+server through a small shared hub the destructor empties first.
+`set_text_handler` swaps the handler under its own lock, so once it returns
+the old one is not running. `text_session_count()` counts the text-only
+sessions, and `Stats` the requests and replies.
+
 The address is brolink's `local_address("broremote", name)`, with bromux's
 safeguards. On Linux the socket is created mode 0600 in a 0700 directory and
 the peer's uid is checked (`SO_PEERCRED`) on both sides; without
@@ -483,6 +524,15 @@ last call, and the latency tracker's means), `audio()`, `probe()` /
 `sessionGone` comes just before one is destroyed, `wake` when a picture
 arrives) and `viewerSession(object)`, which finds the session an object
 stands for. bro's `<remoteview>` is that host (docs/remote-api.js).
+
+`session.request(command, {outArg})` (1.6) sends a command line (a string,
+split like a shell line, or an array) over the session's text lane, which
+`ViewerSession::request` opens on first use (another connection like the
+control one, joined with the session's grant); it returns a promise of
+`{ok, text, file}` (`file` a Uint8Array when `outArg` named an output path),
+settled by `tickRemote()`. `TextClient` (text_client.h) is the same protocol
+without a viewer: `open()` makes a text-only session, `join()` a session's
+text lane; bro's `bro-ctl --remote` is built on it.
 
 ### Codecs
 
@@ -831,6 +881,16 @@ realm's `status()` sees it. bro's docs/remote-api.js is the reference.
   (tests/test_server.cpp, tests/test_wire.cpp); and the lane through a
   second `broremote proxy` (tests/test_proxy.cpp). The transport itself is
   tested in brolink.
+- Protocol 1.6 text (tests/test_server.cpp, tests/test_wire.cpp,
+  tests/test_viewer.cpp, tests/test_api.cpp): the messages with and without
+  their optional last fields; a text-only session counts as no client and
+  gets no frame encoded; replies from another thread, out of order, with a
+  file; a request open when the connection closes is failed; a text-only
+  session beside a viewer is sent no StreamConfig / Video / Cursor and
+  changes nothing for it; a viewer's own text lane (TextClient::join and
+  ViewerSession::request) and its end with the session; TextRequest refused
+  on the input lane and Input on the text lane; no handler; a reply after
+  the server is gone; `session.request()` in a realm with a file reply.
 - Hardware streaming (Linux with a hardware encoder; skipped otherwise),
   per codec brovideo reports in hardware, ffmpeg decoding when it is on PATH
   (tests/test_hw_stream.cpp): a Server to a Client in process with a

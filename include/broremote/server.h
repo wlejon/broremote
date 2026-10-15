@@ -40,6 +40,22 @@ struct ServerAudioConfig {
     uint32_t period_ms = 5;       // the device period asked for, both directions
 };
 
+// The text lane (1.6): a command line from a client, for the host to run
+// and answer. broremote only relays it; what the commands are is the host's
+// (bro: its agent control commands, docs/agent-control.md there).
+struct TextRequest {
+    std::vector<std::string> argv;  // argv[0] is the command
+    // 0: none. Else the index (>= 1) of an argument naming an output file: the
+    // host writes it somewhere private (keeping the extension) and passes
+    // the bytes to reply() as `file`.
+    size_t out_arg = 0;
+    std::string client;             // the session's name (its Hello)
+    bool text_only = false;         // the session has no video (a NoVideo Hello): an agent, not a viewer
+    // Any thread, once. Safe after the session or the Server has gone (the
+    // reply is then dropped).
+    std::function<void(bool ok, std::string payload, std::string file)> reply;
+};
+
 struct ServerConfig {
     std::string socket_name = "default";        // where it listens: a socket or pipe named for it (stream.h)
     std::vector<Codec> codecs = {Codec::HEVC, Codec::H264};  // preference order; those this build cannot encode are skipped
@@ -82,9 +98,20 @@ public:
     // client as it joins.
     void set_cursor(const CursorState& cursor);
 
-    // Clients that completed the handshake.
+    // Who runs the text lane's requests (1.6). It is called on the I/O
+    // thread, must not block (hand the request on and reply() later, from
+    // any thread) and must not call into the Server except through reply.
+    // Empty (the default): every request is answered "this host serves no
+    // text requests". Any thread; once it returns, the old handler is not
+    // running and will not be called again.
+    void set_text_handler(std::function<void(TextRequest)> handler);
+
+    // Viewers: clients that completed the handshake and take video. A
+    // text-only session (NoVideo) is not one.
     [[nodiscard]] size_t client_count() const;
-    // False when no client is attached: the host can skip submitting.
+    // Text-only sessions attached (1.6).
+    [[nodiscard]] size_t text_session_count() const;
+    // False when no viewer is attached: the host can skip submitting.
     [[nodiscard]] bool wants_frames() const;
     // The address it listens on: a socket path, or a pipe name on Windows.
     [[nodiscard]] const std::string& socket_path() const;
@@ -118,6 +145,8 @@ public:
         uint64_t audio_lanes = 0;   // audio lanes started (1.3)
         uint64_t audio_up = 0;      // AudioUp packets received (the viewers' mics)
         uint64_t audio_down = 0;    // AudioDown packets sent (this machine's audio)
+        uint64_t text_requests = 0; // TextRequests received (1.6)
+        uint64_t text_replies = 0;  // TextReplies sent
     };
     [[nodiscard]] Stats stats() const;
 

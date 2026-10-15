@@ -55,6 +55,7 @@ int usage() {
                  "           [--no-audio] [--mic-default]: audio lanes (on by default where PipeWire is)\n"
                  "           send this machine's audio and make each viewer's mic a node here;\n"
                  "           --mic-default makes that node the default source while it exists\n"
+                 "           text requests (protocol 1.6) are answered with \"echo\" and their words\n"
                  "       broremote codecs\n"
                  "       broremote encode [--codec C] [--size WxH] [--frames N] [--bitrate KBPS] [--fps N]\n"
                  "                        [--keyframe-every N] [--out FILE] [--content scroll|desktop]\n"
@@ -182,6 +183,12 @@ int cmd_serve_test(int argc, char** argv) {
     }
     std::fprintf(stderr, "broremote serve-test: %s, %s %ux%u at %u fps\n", server->socket_path().c_str(),
                  codec_name(cfg.codecs.front()), width, height, cfg.fps);
+    // Text requests (1.6) are echoed: "echo <args...>" as the reply.
+    server->set_text_handler([](TextRequest r) {
+        std::string s = "echo";
+        for (const auto& a : r.argv) s += " " + a;
+        r.reply(true, std::move(s), {});
+    });
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 

@@ -26,6 +26,7 @@ parts; [docs/protocol.md](docs/protocol.md) is the wire catalogue.
 | Codecs: Raw, VA-API encode (HEVC default, H.264, AV1), Media Foundation decode | in brovideo |
 | `ViewerSession` (the viewer minus its window) and `bro.remote.connect` (protocol 1.4: relative motion, pointer lock) | done; bro's `<remoteview>` and helmapps' remote app show it; `broremote probe` runs it with no window for scripted checks |
 | Audio lane (1.3): raw PCM both ways; the viewer's mic is a PipeWire source on the host, the host's output plays on the viewer (WASAPI) | done, tested Windows to Linux |
+| Text (1.6): the host's control commands over a text-only session or a session's `text` lane (`TextClient`, `session.request()`) | done; bro's `bro-ctl --remote` drives helm with it |
 | bro host adapter (in bro, `BRO_WITH_REMOTE`) | done (helm `--remote`) |
 
 Measured: the halo's 1920x1080 test pattern at 60 fps over ssh to a Windows

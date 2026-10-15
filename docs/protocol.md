@@ -1,4 +1,4 @@
-# broremote wire protocol, version 1.5
+# broremote wire protocol, version 1.6
 
 A viewer and a broremote server talk over byte streams: a control connection, and from 1.2 optionally further connections (lanes, below) that join its session. Locally each is a connection to the server's local address: an AF_UNIX stream socket on Linux and macOS, a named pipe on Windows. Remotely each is the stdio of its own `ssh host broremote proxy`, which relays bytes to the remote host's local address without reading them. The protocol is the same in every case, and nothing in it depends on the transport. The transport (local listener and connector, peer checks, spawned streams, the proxy relay, lane grants) is the brolink sibling's.
 
@@ -109,11 +109,49 @@ Ping             ------------------>
 - **The host's side.** For the mic the host makes a microphone node named for the viewer (`AudioStarted.mic_node`, e.g. "broremote: laptop mic") that exists while the lane does; optionally it is the default source meanwhile, and the previous default is restored. The host's audio is the default output's monitor. The host's audio system restarting (a PipeWire daemon restarted) does not end the lane: the host reconnects to it and makes the mic node and the monitor capture again, and meanwhile (1.5) `AudioStats.status` says why there is no audio.
 - **Lifetime and failure.** The lane ends with its connection or with the session's control connection. Its failing, or the host lacking audio devices (`AudioStarted` with both directions off and `message` saying why), changes nothing on the control connection or the input lane. Any other message on the lane gets `Error(UnknownMessage)` and the lane stays; `AudioUp` or `AudioControl` before `AudioStart`, a second `AudioStart`, an `AudioUp` that is not whole frames, or `Hello` / `Join` are `Error(BadMessage)` and close the lane.
 
+## Text (1.6)
+
+Text is the host's control commands and their replies: an agent (or a viewer app) sends a command line, the host runs it and answers. broremote carries them and nothing else; what the commands are is the host's (bro: its agent control commands, bro's docs/agent-control.md and docs/agent-view.md), so a new host command needs nothing here. The bodies are exactly bro's control protocol's `Request` / `Reply` (bro's `src/platform/control_protocol.h`).
+
+```
+text-only session (an agent)          server
+Hello(flags: NoVideo) ------------->
+                 <------------------ Welcome
+TextRequest(id 1, "windows") ------>
+TextRequest(id 2, "view") --------->
+                 <------------------ TextReply(id 2)    (in the order the commands finish)
+                 <------------------ TextReply(id 1)
+
+a viewer's text lane                  server
+Join(session, token, "text") ------>
+                 <------------------ Joined
+TextRequest ... / TextReply ...
+```
+
+- **Sessions.** A session is still one control connection and its lanes. Text comes two ways:
+  - **A text-only session.** A `Hello` whose `flags` has bit 0 (`NoVideo`) makes a session that is not a viewer: it is sent no `StreamConfig`, `Video` or `Cursor`; it does not count as a client (the host's `wants_frames()` stays false, so with only agents attached no encoder runs and no frame is captured); its `SetCodec` and `RequestKeyframe` change nothing. Its text goes on its control connection, where nothing else is queued.
+  - **The text lane** of any session, `Join(..., "text")`, joined like the input and audio lanes: a viewer's text never waits behind its video.
+  So an agent beside a person's live viewer is simply a second session (text-only) of the same server; the person's video and input lanes are untouched by it, and the agent alone runs no encoder. A viewer app that wants text in its own session joins its own text lane. `TextRequest` on the control connection of a video session is also answered, but its replies queue behind video there.
+- **Requests.** Each `TextRequest` carries the client's id; the `TextReply` with the same id answers it. Several may be in flight; replies come back in the order the commands finish. The host answers each request exactly once. A server allows 256 requests in flight per connection; beyond that a request is answered at once (not ok). An empty command is answered (not ok); a malformed body is `Error(BadMessage)` and closes the connection.
+- **Files.** A command that writes a file (a screenshot) writes it on the host, where the client cannot read it. `out_arg`, when nonzero, names the argument that is an output path: the host replaces it with a private file of its own (keeping the argument's extension), runs the command, and returns the file's bytes in the reply's `file` (then removes it). So `shot w3 out.png` with `out_arg` 2 brings the PNG back in the reply. A directory (a recording) does not come back this way.
+- **No host.** A host that runs no text handler answers every request (not ok, "this host serves no text requests").
+- **Lifetime.** A text lane ends with its session, like every lane; a request still open is never answered then (the client fails it itself). A reply for a connection that has gone is dropped.
+- **Authorization.** Text runs the host's commands with the host's rights: input, screenshots, launching programs, JavaScript in the page. Whoever can reach the server can do all of it, and reaching it already takes the host user's own local socket (the peer's uid checked) or an ssh login as that user, so the session is the authorization; there is no other. Granting someone ssh access to the host user grants this too.
+- A 1.5 server does not know the lane (`JoinRefused`), ignores `NoVideo` (it would send video), and answers `TextRequest` with `Error(UnknownMessage)`; a client checks `Welcome`'s minor >= 6 first.
+
+### Not yet: text between agents
+
+The lane is built so that requests need not end at the host's dispatcher. The next steps, in order, all keeping the same request / reply bodies:
+
+1. **To an agent inside the session.** An agent running in the hosted session (a bro app, say) registers a name with the host; a request whose command is addressed to that name (an `@name` first word, or a new field appended to `TextRequest`) is relayed to it instead of the host's dispatcher, and its answer comes back as the reply. The host's dispatcher is then just the default addressee.
+2. **Requests the other way.** The server sends `TextRequest` to a client that offered to answer (a flag appended to `Hello`, or a lane name), so an agent inside the session can ask the remote agent something; ids are per direction.
+3. **Between machines.** A host forwards a request addressed to another machine over a session of its own to that machine's server (each hop an ssh login, so each hop's authorization is that login's), which makes agents on several machines one addressable set.
+
 ## Messages: client to server (0x01xx)
 
 | Type | Name | Body |
 |------|------|------|
-| 0x0101 | Hello | `u8[4] magic` ("BRRM"), `u16 major`, `u16 minor`, `str client_name` (at most 256 bytes) |
+| 0x0101 | Hello | `u8[4] magic` ("BRRM"), `u16 major`, `u16 minor`, `str client_name` (at most 256 bytes); 1.6 appends `varint flags` (bit 0 `NoVideo`: a text-only session; unknown bits are ignored) |
 | 0x0102 | Ack | `varint frame_id` — the highest frame id finished with |
 | 0x0103 | RequestKeyframe | (empty) — the decoder lost sync; the next frame is a keyframe |
 | 0x0104 | Input | `InputEvent` (below) |
@@ -123,6 +161,7 @@ Ping             ------------------>
 | 0x0108 | AudioStart (1.3) | `str source` (the viewer's machine, at most 256 bytes), `bool playback`, `AudioFormat playback_format`, `bool mic`, `AudioFormat mic_format` — the audio lane's first message after `Joined` |
 | 0x0109 | AudioUp (1.3) | `varint seq`, `u64 capture_us` (the viewer's clock), `bytes pcm` (at most 1 MiB; whole frames of the mic format) |
 | 0x010A | AudioControl (1.3) | `bool playback_muted` (the host stops sending `AudioDown`), `bool mic_muted` (the host's mic node plays silence) |
+| 0x010B | TextRequest (1.6) | `varint id`, `varint argc` (at most 4096), `str` × argc (argv; argv[0] the command), then optionally `varint out_arg` (absent: 0; else < argc, the output-path argument) |
 
 ### InputEvent
 
@@ -154,6 +193,7 @@ Input is in the server's terms, so the host injects it as if it came from its ow
 | 0x0209 | AudioStarted (1.3) | `bool playback`, `AudioFormat playback_format`, `bool mic`, `AudioFormat mic_format`, `str mic_node` (at most 256 bytes), `str message` (why a direction is off; at most 4096 bytes) |
 | 0x020A | AudioDown (1.3) | as `AudioUp`, the host's clock and the playback format |
 | 0x020B | AudioStats (1.3) | `bool mic_valid`, `u64 mic_capture_us` (the viewer's clock), `u64 mic_out_us` (the host's: when its mic node played that frame), `varint mic_buffer_us`, `varint mic_underruns`, `varint mic_dropped_frames`, `varint playback_dropped` (`AudioDown` packets the host dropped); 1.5 appends `str status` (at most 4096 bytes: what is wrong with the host's audio now, e.g. its audio system restarting; empty when nothing) |
+| 0x020C | TextReply (1.6) | `varint id` (the request's), `bool ok`, `str payload` (text or JSON, or why it failed), then optionally `bytes file` (absent: none; the `out_arg` file) |
 
 ### Timing (1.1)
 

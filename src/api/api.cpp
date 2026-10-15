@@ -163,6 +163,7 @@ Value statusObject() {
         st.set("socket", ev::null());
         st.set("socketPath", ev::null());
         st.set("clients", 0.0);
+        st.set("textSessions", 0.0);
         st.set("codec", ev::null());
         st.set("width", 0.0);
         st.set("height", 0.0);
@@ -171,6 +172,7 @@ Value statusObject() {
     st.set("socket", g_config.socket_name);
     st.set("socketPath", g_server->socket_path());
     st.set("clients", static_cast<double>(g_server->client_count()));
+    st.set("textSessions", static_cast<double>(g_server->text_session_count()));
     const auto stream = g_server->stream();
     if (stream) st.set("codec", codec_name(stream->codec));
     else st.set("codec", ev::null());
@@ -197,6 +199,8 @@ Value statusObject() {
     stats.set("audioLanes", static_cast<double>(s.audio_lanes));
     stats.set("audioUp", static_cast<double>(s.audio_up));
     stats.set("audioDown", static_cast<double>(s.audio_down));
+    stats.set("textRequests", static_cast<double>(s.text_requests));
+    stats.set("textReplies", static_cast<double>(s.text_replies));
     st.set("stats", stats.get());
     {
         ev::Persistent audio(audioObject());
