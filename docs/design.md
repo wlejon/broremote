@@ -581,6 +581,15 @@ What stays in broremote is the policy around them:
   waiting for the screen to change, then sharpened. Raw is lossless: only
   the keyframes. Repeats carry no `FrameTiming` (no host frame is behind
   them), so the latency figures leave them out; `Stats::repeats` counts them.
+- *Damage.* Repeats cannot sharpen a small region that changes again
+  before they run (a progress line rewritten at 20 Hz right after a big
+  change lands at about 20 dB, frame after frame). A host that knows its
+  damage puts it on the frame (`Frame::damage`), and brovideo's VA-API
+  encoder codes a small damage finer, so that line lands at 48 dB (HEVC);
+  a big damage gets nothing extra (brovideo docs/design.md, "Damage";
+  test_text_quality). The server keeps the damage true to the encoder's
+  last picture: a replaced pending frame's damage is added to the newer
+  one's, and after a frame that went unencoded the next one's is unknown.
 - *Reconfigure.* A size or bitrate change reconfigures the encoder in place;
   a codec change makes a new one. Either way a new `StreamConfig` goes out.
 - *Cropping.* The `StreamConfig` size is the truth: a decoded picture can be
