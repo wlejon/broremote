@@ -83,6 +83,13 @@ public:
     // While encoding is paused (a client is at its ack window) the pending
     // frame waits, so the frame encoded on resume is the newest one.
     //
+    // A frame's damage (Frame::damage_known / damage, against the frame
+    // submitted before it) reaches the encoder, which codes a small damage
+    // finer so it lands sharp at once: a host that knows its damage (a
+    // compositor) should say so. The server keeps it true to the encoder's
+    // last picture: a replaced frame's damage is added to the newer frame's,
+    // and after a frame that went unencoded the next one's is unknown.
+    //
     // `release` is called exactly once per submit, once the server no longer
     // reads the frame's memory: inside submit() itself (on the caller's
     // thread) for a replaced frame or when nobody is watching; otherwise on

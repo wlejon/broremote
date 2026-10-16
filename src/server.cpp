@@ -87,6 +87,35 @@ Server::~Server() {
     s.loop.reset();
 }
 
+namespace {
+
+// More rects than this from merging replaced frames become their bounding
+// box: the encoder merges them down to a handful of regions anyway.
+constexpr size_t kMaxDamageRects = 64;
+
+// `next` replaces `older` unencoded, so what the encoder sees change is
+// both frames' damage.
+void merge_damage(Frame& next, const Frame& older) {
+    if (!next.damage_known) return;
+    if (!older.damage_known) {
+        next.damage_known = false;
+        next.damage.clear();
+        return;
+    }
+    next.damage.insert(next.damage.end(), older.damage.begin(), older.damage.end());
+    if (next.damage.size() <= kMaxDamageRects) return;
+    uint32_t x0 = UINT32_MAX, y0 = UINT32_MAX, x1 = 0, y1 = 0;
+    for (const brovideo::Rect& r : next.damage) {
+        x0 = std::min(x0, r.x);
+        y0 = std::min(y0, r.y);
+        x1 = std::max(x1, r.x + r.width);
+        y1 = std::max(y1, r.y + r.height);
+    }
+    next.damage.assign(1, brovideo::Rect{x0, y0, x1 - x0, y1 - y0});
+}
+
+}  // namespace
+
 void Server::submit(const Frame& frame, std::function<void()> release) {
     Impl& s = *impl_;
     std::optional<Pending> old;
@@ -96,14 +125,17 @@ void Server::submit(const Frame& frame, std::function<void()> release) {
         ++s.stats.submitted;
         if (s.stop || s.attached.load() == 0) {
             ++s.stats.unwatched;
+            s.damage_gap = true;
             now = true;
         } else {
+            Pending p{frame, std::move(release), Clock::now()};
             if (s.pending) {
                 ++s.stats.replaced;
+                merge_damage(p.frame, s.pending->frame);
                 old.swap(s.pending);
             }
             if (s.paused()) ++s.stats.window_waits;
-            s.pending = Pending{frame, std::move(release), Clock::now()};
+            s.pending = std::move(p);
         }
     }
     if (now) {

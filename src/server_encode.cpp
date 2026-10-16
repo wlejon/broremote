@@ -123,8 +123,14 @@ void Server::Impl::encode_loop() {
 
         Pending p = std::move(*pending);
         pending.reset();
+        if (damage_gap) {
+            p.frame.damage_known = false;
+            p.frame.damage.clear();
+            damage_gap = false;
+        }
         if (attached.load() == 0) {
             ++stats.unwatched;
+            damage_gap = true;
             repeats_left = 0;
             lk.unlock();
             if (p.release) p.release();

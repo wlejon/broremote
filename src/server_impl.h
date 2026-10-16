@@ -146,6 +146,10 @@ struct Server::Impl final : brolink::LoopHandler {
     std::condition_variable encode_cv;
     bool stop = false;
     std::optional<Pending> pending;
+    // A submitted frame went unencoded (nobody watching), so the next frame's
+    // damage, which is against the frame submitted before it, says nothing
+    // about what changed since the encoder's last picture.
+    bool damage_gap = false;
     // Every connection: attached clients, their lanes, and those not yet past
     // Hello / Join. Only the I/O thread adds or removes them.
     std::vector<std::unique_ptr<ClientConn>> clients;
