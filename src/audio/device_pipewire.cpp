@@ -42,6 +42,10 @@
 #include <optional>
 #include <vector>
 
+#ifndef PW_KEY_LOOP_RT_PRIO
+#define PW_KEY_LOOP_RT_PRIO "loop.rt-prio"        // before 1.2
+#endif
+
 namespace broremote::audio {
 
 namespace {
