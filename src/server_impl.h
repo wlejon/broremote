@@ -15,6 +15,7 @@
 
 #include <brolink/lanes.h>
 #include <brolink/loop.h>
+#include <brolink/peer.h>
 
 #include <atomic>
 #include <chrono>
@@ -59,6 +60,7 @@ struct ClientConn {
     bool closing = false;           // flush what is queued (an Error), then close it
     Clock::time_point close_deadline{};
     std::string name;
+    brolink::ProcessOrigin origin;  // the process at the other end, from accept (TextRequest's peer_*)
     uint16_t minor = 0;             // the protocol minor the client's Hello said
     // Video messages in `out` whose FrameSent is owed (minor >= 1), oldest
     // first; `msg` identifies the message while it is still queued.

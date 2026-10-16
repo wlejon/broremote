@@ -42,9 +42,12 @@ ClientConn* Server::Impl::find(brolink::ConnId id) {
 }
 
 void Server::Impl::on_accept(brolink::ConnId id) {
+    // Read once, before the lock: who connected (a /proc read on Linux).
+    brolink::ProcessOrigin origin = brolink::describe_process(loop->peer_pid(id));
     std::lock_guard<std::mutex> lk(m);
     auto c = std::make_unique<ClientConn>();
     c->id = id;
+    c->origin = std::move(origin);
     clients.push_back(std::move(c));
 }
 
@@ -293,6 +296,10 @@ void Server::Impl::handle_text_request(ClientConn& c, std::string_view payload) 
     out.out_arg = size_t(req.out_arg);
     out.client = session->name;
     out.text_only = session->text_only;
+    // The connection it came on: a lane may be its own ssh login.
+    out.peer_pid = c.origin.pid;
+    out.peer_user = c.origin.user;
+    out.peer_ssh_client = c.origin.ssh_client;
     out.reply = [hub = text_hub, conn = c.id, id = req.id](bool ok, std::string text, std::string file) {
         std::lock_guard<std::mutex> lk(hub->mu);
         if (hub->impl) hub->impl->deliver_text_reply(conn, TextReplyMsg{id, ok, std::move(text), std::move(file)});

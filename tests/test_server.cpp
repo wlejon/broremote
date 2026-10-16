@@ -7,6 +7,9 @@
 #include "check.h"
 #include "viewer.h"
 
+#include <brolink/paths.h>
+#include <brolink/peer.h>
+
 #include <algorithm>
 #include <optional>
 #include <random>
@@ -788,6 +791,9 @@ void test_text() {
             });
         } else if (cmd == "file") {
             r.reply(true, "{\"path\":\"" + r.argv.at(r.out_arg) + "\"}", std::string("\x89PNG\r\n\0x", 8));
+        } else if (cmd == "who") {
+            r.reply(true, std::to_string(r.peer_pid) + " " + r.peer_user + " " + r.client + " [" + r.peer_ssh_client + "]",
+                    {});
         } else {
             r.reply(false, "no command '" + cmd + "'", {});
         }
@@ -821,6 +827,16 @@ void test_text() {
         CHECK_EQ(r.payload, std::string("{\"path\":\"out.png\"}"));
         CHECK_EQ(r.file, std::string("\x89PNG\r\n\0x", 8));
 
+        // Who asked: the process at the other end (this one: the session is
+        // in-process), as the operating system tells it, and the session's name.
+        r = t->request_sync({"who"});
+        CHECK(r.ok);
+        {
+            const brolink::ProcessOrigin self = brolink::describe_process(brolink::current_pid());
+            CHECK_EQ(r.payload, std::to_string(brolink::current_pid()) + " " + self.user + " agent [" +
+                                    self.ssh_client + "]");
+        }
+
         // Several in flight: replies come back as the commands finish.
         std::mutex m;
         std::vector<std::string> order;
@@ -835,8 +851,8 @@ void test_text() {
             return order.size() == 3;
         }));
         CHECK(order == (std::vector<std::string>{"after 0", "after 150", "after 300"}));
-        CHECK_EQ(server->stats().text_requests, uint64_t(6));
-        CHECK_EQ(server->stats().text_replies, uint64_t(6));
+        CHECK_EQ(server->stats().text_requests, uint64_t(7));
+        CHECK_EQ(server->stats().text_replies, uint64_t(7));
 
         // A request still open when the connection closes is answered (not ok).
         TextReply pending;

@@ -51,6 +51,16 @@ struct TextRequest {
     size_t out_arg = 0;
     std::string client;             // the session's name (its Hello)
     bool text_only = false;         // the session has no video (a NoVideo Hello): an agent, not a viewer
+    // Who sent it, as the operating system tells it of the connection it
+    // came on (brolink/peer.h), not as the client says: the process (pid 0:
+    // not known), the user it runs as (the host's own: only the user's
+    // processes reach the server), and the address of the ssh client whose
+    // login started it (a session through `ssh host broremote proxy`; read
+    // from its environment, Linux only), empty for a process of the host's
+    // own session. Facts to report (who asked), not a credential.
+    uint64_t peer_pid = 0;
+    std::string peer_user;
+    std::string peer_ssh_client;
     // Any thread, once. Safe after the session or the Server has gone (the
     // reply is then dropped).
     std::function<void(bool ok, std::string payload, std::string file)> reply;
