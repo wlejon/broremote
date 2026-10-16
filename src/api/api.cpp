@@ -188,6 +188,7 @@ Value statusObject() {
     ObjectBuilder stats;
     stats.set("submitted", static_cast<double>(s.submitted));
     stats.set("encoded", static_cast<double>(s.encoded));
+    stats.set("damaged", static_cast<double>(s.damaged));
     stats.set("keyframes", static_cast<double>(s.keyframes));
     stats.set("repeats", static_cast<double>(s.repeats));
     stats.set("replaced", static_cast<double>(s.replaced));

@@ -204,6 +204,7 @@ void Server::Impl::encode_loop() {
         }
         send(pkt, &timing);
         ++stats.encoded;
+        if (f.damage_known) ++stats.damaged;
         start_repeats(encode_end);
         waker.wake();
     }
