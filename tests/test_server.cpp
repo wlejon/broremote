@@ -892,6 +892,8 @@ void test_text() {
         v.close();
         CHECK(check::wait_for([&] { return !lane->connected(); }));
         CHECK(!lane->request_sync({"echo"}).ok);
+        // Gone from the server too, so the next phase's count is its own viewer.
+        WAIT(server->client_count() == 0, 5000);
     }
 
     check::phase("text: the raw protocol");
@@ -909,9 +911,12 @@ void test_text() {
         CursorState cs;
         cs.x = 5;
         server->set_cursor(cs);
+        // Wait for each frame's own picture, not a count: the watcher joins a
+        // server whose encoder still holds the last phase's picture, and the
+        // keyframe it is sent on joining may be that picture repeated.
         for (uint32_t i = 0; i < 2; ++i) {
-            src.submit(*server, 64, 48, i);
-            WAIT(watcher.picture_count() == i + 1, 5000);
+            auto& s = src.submit(*server, 64, 48, i);
+            WAIT(watcher.last_picture().pixels == s.pixels, 5000);
         }
         p.s->write(TextRequestMsg{9, {"echo", "raw"}, 0}.encode());
         WAIT(p.got(MsgType::TextReply), 5000);
