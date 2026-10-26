@@ -69,6 +69,14 @@ void shutdownRemote();
 // The session decodes; the host shows its pictures and sends its input
 // (bro: the <remoteview> element), reaching the session through
 // viewerSession().
+//
+// Access: with `ssh`, every connection of the session starts a program, so
+// connect asks the host's access gate (bronze::embed::checkAccess,
+// embed/embed_access.h) for AccessKind::Spawn with the line it would run
+// ("<ssh program> <host> <remote command>") before anything starts; a refusal
+// is thrown as bronze::embed::newAccessError (code EACCES; PermissionRevoked
+// for a revoked grant). A local socket, a name bro places in its own runtime
+// directory, asks nothing (the host's own gate on bro.remote covers it).
 
 struct ViewerHooks {
     // A session is about to start: the host sets what its display needs on

@@ -11,6 +11,7 @@
 #include "broremote/stream.h"
 
 #include "embed/embed.h"
+#include "embed/embed_access.h"
 #include "eval/eval.h"
 
 #include <atomic>
@@ -181,6 +182,21 @@ int main() {
     CHECK_EQ(run("(() => { try { bro.remote.connect({audio: 1}); return 'no' } catch (e) { "
                  "return e instanceof TypeError ? 'ok' : e.message } })()"),
              std::string("ok"));
+
+    check::phase("connect: over ssh it asks the host's Spawn first");
+    {
+        std::vector<std::string> asked;
+        ev::setAccessGate([&](const ev::AccessRequest& r) -> std::string {
+            if (r.kind != ev::AccessKind::Spawn) return "unexpected access";
+            asked.emplace_back(r.subject);
+            return "no spawn permission: " + std::string(r.subject);
+        });
+        CHECK_EQ(run("(() => { try { bro.remote.connect({ssh: 'nohost.invalid', sshProgram: 'myssh', audio: false});"
+                     " return 'no' } catch (e) { return e.code + '|' + e.message } })()"),
+                 std::string("EACCES|no spawn permission: myssh nohost.invalid broremote proxy"));
+        CHECK_EQ(asked.size(), size_t{1});
+        ev::setAccessGate(nullptr);
+    }
 
     check::phase("connect: a session to an in-process server");
     struct ViewerLog {

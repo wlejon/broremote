@@ -13,6 +13,8 @@
 #include "viewer_api.h"
 
 #include "api.h"
+#include "broremote/connect.h"
+#include "embed/embed_access.h"
 
 #include <algorithm>
 #include <cmath>
@@ -446,6 +448,15 @@ ViewerSession* viewerSession(Value object) {
 void defineConnect(ObjectBuilder& remote) {
     remote.def("connect", 1, [](Value, std::span<const Value> args) -> Value {
         ViewerOptions options = optionsFrom(args);
+        // Over ssh every connection of the session starts a program (the
+        // page's sshProgram, or the system's ssh) with the page's command:
+        // the host's Spawn (embed/embed_access.h), asked before anything runs.
+        if (options.target.remote() && ev::accessGateActive()) {
+            const ConnectTarget& t = options.target;
+            const std::string line = ssh_program(t) + " " + t.ssh_host + " " + remote_command(t);
+            if (std::string refused = ev::checkAccess(ev::AccessKind::Spawn, line); !refused.empty())
+                return ev::throwAccessError(refused, "EACCES");
+        }
         auto entry = std::make_unique<Entry>();
         entry->id = g_nextId++;
         entry->session = std::make_unique<ViewerSession>(g_viewerHooks.wake);
