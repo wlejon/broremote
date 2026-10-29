@@ -162,9 +162,8 @@ One model covers both cases asked for (an agent with a person watching, an
 agent alone): agents never share a person's session, so neither needs the
 other's grant and either can come and go. The authorization is the session:
 reaching the server at all takes the host user's socket or an ssh login as
-that user. docs/protocol.md has the messages, the `out_arg` file return (a
-screenshot's PNG comes back in the reply) and the planned agent-to-agent
-steps.
+that user. docs/protocol.md has the messages and the `out_arg` file return (a
+screenshot's PNG comes back in the reply).
 
 ### The audio lane (1.3)
 
